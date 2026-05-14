@@ -737,4 +737,10 @@ else
     getgenv().RestoreGUI = createGUI
     
     setupKeybind()
-    create
+    createGUI()
+    saveConfig()
+    
+    notify("⚡ FLICK TO MURDERER v6 LOADED ⚡\nReturn after LMB | Randomness: " .. Config.ReturnRandomness .. "% | Delay: " .. Config.ReturnDelay .. "ms", 3)
+end
+
+print("Flick To Murderer v6 loaded - Return ONLY after LMB click!")
