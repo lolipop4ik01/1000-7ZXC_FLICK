@@ -1,6 +1,6 @@
 --[[
-    Flick To Murderer - Максимальная скорость + возврат камеры + поддержка 3 лица + Рандомная часть тела
-    Версия: 5.0
+    Flick To Murderer - Максимальная скорость + возврат камеры ПОСЛЕ ЛКМ
+    Версия: 6.0
 ]]
 
 -- ========== СЕРВИСЫ ==========
@@ -20,14 +20,15 @@ local Config = {
     AutoShoot = false,
     InstantFlick = true,
     ReturnCamera = false,
-    ReturnRandomness = 5,
+    ReturnRandomness = 50,
+    ReturnDelay = 2,
     RandomBodyPart = false,
     MainPos = {X = 0.5, Y = 0.5, XOff = -160, YOff = -210},
     CirclePos = {X = 0.85, Y = 0.85, XOff = 0, YOff = 0}
 }
 
 -- ========== СИСТЕМА СОХРАНЕНИЯ ==========
-local CONFIG_FILE = "flick_config_v5.json"
+local CONFIG_FILE = "flick_config_v6.json"
 
 local function saveConfig()
     pcall(function()
@@ -135,6 +136,7 @@ end
 
 -- ========== ЛОГИКА FLICK ==========
 local lastCameraCFrame = nil
+local waitingForLMB = false
 
 -- Список возможных частей тела для прицеливания
 local BODY_PARTS = {
@@ -151,13 +153,11 @@ local function getRandomBodyPart(character)
         end
     end
     
-    -- Если есть части, выбираем случайную
     if #availableParts > 0 then
         local randomPart = availableParts[math.random(1, #availableParts)]
         return randomPart.Position
     end
     
-    -- Если ничего не нашли, возвращаем позицию HumanoidRootPart
     local root = character:FindFirstChild("HumanoidRootPart")
     if root then return root.Position end
     
@@ -215,7 +215,6 @@ local function autoShoot(murderer)
     local remote = findShootRemote()
     if not remote then return end
     
-    -- Получаем позицию для выстрела (рандомная часть тела или HumanoidRootPart)
     local targetPos
     if Config.RandomBodyPart then
         targetPos = getRandomBodyPart(murderer.Character)
@@ -240,8 +239,9 @@ local function returnCameraWithRandomness()
     local cam = workspace.CurrentCamera
     local targetCFrame = lastCameraCFrame
     
-    local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomness / 100)
-    local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomness / 100)
+    -- Увеличенный разброс
+    local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomness / 25)
+    local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomness / 25)
     
     local right = targetCFrame.RightVector
     local up = targetCFrame.UpVector
@@ -250,25 +250,7 @@ local function returnCameraWithRandomness()
     local newLook = (look + right * randomX + up * randomY).Unit
     local newCFrame = CFrame.lookAt(targetCFrame.Position, targetCFrame.Position + newLook)
     
-    if Config.InstantFlick then
-        cam.CFrame = newCFrame
-    else
-        local oldCFrame = cam.CFrame
-        local currentLook = oldCFrame.LookVector
-        local targetLook = newCFrame.LookVector
-        local dot = math.clamp(currentLook:Dot(targetLook), -1, 1)
-        local angleDist = math.acos(dot)
-        local angularSpeed = Config.FlickSpeed * 10 * math.pi
-        local totalTime = math.max(angleDist / angularSpeed, 0.016)
-        local steps = 4
-        local waitTime = totalTime / steps
-        
-        for i = 1, steps do
-            cam.CFrame = oldCFrame:Lerp(newCFrame, i / steps)
-            task.wait(waitTime)
-        end
-    end
-    
+    cam.CFrame = newCFrame
     lastCameraCFrame = nil
 end
 
@@ -291,11 +273,12 @@ local function flickToMurderer()
     local rootPart = char:FindFirstChild("HumanoidRootPart")
     if not rootPart then return end
     
+    -- Сохраняем позицию камеры ДО флика
     if Config.ReturnCamera then
         lastCameraCFrame = cam.CFrame
     end
     
-    -- Получаем позицию цели (рандомная часть тела или HumanoidRootPart)
+    -- Получаем позицию цели
     local targetPos
     if Config.RandomBodyPart then
         targetPos = getRandomBodyPart(murderer.Character)
@@ -313,6 +296,7 @@ local function flickToMurderer()
         return
     end
     
+    -- Определяем режим камеры (1 лицо или 3 лицо)
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
     local cameraPos = cam.CFrame.Position
     local isFirstPerson = (cameraPos - headPos).Magnitude < 5
@@ -327,30 +311,30 @@ local function flickToMurderer()
         newCFrame = CFrame.lookAt(newCameraPos, targetPos)
     end
     
+    -- Плавный поворот с реальной разницей скорости
     if Config.InstantFlick then
         cam.CFrame = newCFrame
     else
         local oldCFrame = cam.CFrame
-        local currentLook = oldCFrame.LookVector
-        local targetLook = (targetPos - oldCFrame.Position).Unit
-        local dot = math.clamp(currentLook:Dot(targetLook), -1, 1)
-        local angleDist = math.acos(dot)
-        local angularSpeed = Config.FlickSpeed * 10 * math.pi
-        local totalTime = math.max(angleDist / angularSpeed, 0.016)
-        local steps = 2
-        local waitTime = totalTime / steps
+        local dot = oldCFrame.LookVector:Dot((targetPos - oldCFrame.Position).Unit)
+        local angleDist = math.acos(math.clamp(dot, -1, 1))
+        
+        -- Формула скорости: чем выше скорость, тем быстрее поворот
+        local totalTime = math.clamp(angleDist / (Config.FlickSpeed * 2), 0.01, 0.35)
+        local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
         
         for i = 1, steps do
             cam.CFrame = oldCFrame:Lerp(newCFrame, i / steps)
-            task.wait(waitTime)
+            task.wait(totalTime / steps)
         end
     end
     
+    -- Автовыстрел (если включен)
     autoShoot(murderer)
     
+    -- Ждем ЛКМ для возврата камеры
     if Config.ReturnCamera then
-        task.wait(0.05)
-        returnCameraWithRandomness()
+        waitingForLMB = true
     end
 end
 
@@ -383,6 +367,20 @@ local function setupKeybind()
     getgenv().KeybindConnection = connection
 end
 
+-- ========== ОТСЛЕЖИВАНИЕ ЛКМ ДЛЯ ВОЗВРАТА ==========
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if waitingForLMB and Config.ReturnCamera then
+            waitingForLMB = false
+            -- Задержка перед возвратом (настраивается)
+            task.wait(Config.ReturnDelay / 1000)
+            returnCameraWithRandomness()
+        end
+    end
+end)
+
 -- ========== GUI ==========
 local ScreenGui = nil
 local MainFrame = nil
@@ -409,7 +407,7 @@ local function createGUI()
     makeDraggable(CircleButton, "CirclePos")
     
     MainFrame = Instance.new("Frame")
-    MainFrame.Size = UDim2.new(0, 260, 0, 470)
+    MainFrame.Size = UDim2.new(0, 260, 0, 520)
     MainFrame.Position = UDim2.new(Config.MainPos.X, Config.MainPos.XOff, Config.MainPos.Y, Config.MainPos.YOff)
     MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
     MainFrame.BorderSizePixel = 0
@@ -521,7 +519,7 @@ local function createGUI()
         end
     end)
     
-    -- Random Body Part Toggle (НОВАЯ ФУНКЦИЯ)
+    -- Random Body Part Toggle
     local RandomBodyToggle = Instance.new("TextButton")
     RandomBodyToggle.Size = UDim2.new(1, 0, 0, 35)
     RandomBodyToggle.BackgroundColor3 = Config.RandomBodyPart and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
@@ -536,4 +534,207 @@ local function createGUI()
         RandomBodyToggle.Text = "🎲 RANDOM BODY PART: " .. (Config.RandomBodyPart and "ON" or "OFF")
         RandomBodyToggle.BackgroundColor3 = Config.RandomBodyPart and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
         saveConfig()
-        notify(Config.RandomBodyPart and "Random body part ON - цель в разные части тела" or 
+        notify(Config.RandomBodyPart and "Random body part ON - цель в разные части тела" or "Random body part OFF - цель в центр", 2)
+    end)
+    
+    -- Auto Shoot Toggle
+    local AutoShootToggle = Instance.new("TextButton")
+    AutoShootToggle.Size = UDim2.new(1, 0, 0, 35)
+    AutoShootToggle.BackgroundColor3 = (Config.AutoShoot and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45))
+    AutoShootToggle.TextColor3 = Color3.new(1, 1, 1)
+    AutoShootToggle.Font = Enum.Font.Jura
+    AutoShootToggle.TextSize = 14
+    AutoShootToggle.Text = "🔫 AUTO SHOOT: " .. (Config.AutoShoot and "ON" or "OFF")
+    AutoShootToggle.Parent = Container
+    Instance.new("UICorner", AutoShootToggle).CornerRadius = UDim.new(0, 6)
+    AutoShootToggle.MouseButton1Click:Connect(function()
+        Config.AutoShoot = not Config.AutoShoot
+        AutoShootToggle.Text = "🔫 AUTO SHOOT: " .. (Config.AutoShoot and "ON" or "OFF")
+        AutoShootToggle.BackgroundColor3 = Config.AutoShoot and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
+        saveConfig()
+        notify(Config.AutoShoot and "Auto Shoot ON" or "Auto Shoot OFF", 1)
+    end)
+    
+    -- Return Camera Toggle
+    local ReturnToggle = Instance.new("TextButton")
+    ReturnToggle.Size = UDim2.new(1, 0, 0, 35)
+    ReturnToggle.BackgroundColor3 = Config.ReturnCamera and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
+    ReturnToggle.TextColor3 = Color3.new(1, 1, 1)
+    ReturnToggle.Font = Enum.Font.Jura
+    ReturnToggle.TextSize = 14
+    ReturnToggle.Text = "🔄 RETURN CAMERA: " .. (Config.ReturnCamera and "ON" or "OFF")
+    ReturnToggle.Parent = Container
+    Instance.new("UICorner", ReturnToggle).CornerRadius = UDim.new(0, 6)
+    ReturnToggle.MouseButton1Click:Connect(function()
+        Config.ReturnCamera = not Config.ReturnCamera
+        ReturnToggle.Text = "🔄 RETURN CAMERA: " .. (Config.ReturnCamera and "ON" or "OFF")
+        ReturnToggle.BackgroundColor3 = Config.ReturnCamera and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
+        saveConfig()
+        notify(Config.ReturnCamera and "Camera return ON - возврат после ЛКМ" or "Camera return OFF", 2)
+    end)
+    
+    -- Return Randomness Slider (0-100)
+    local RandomFrame = Instance.new("Frame")
+    RandomFrame.Size = UDim2.new(1, 0, 0, 50)
+    RandomFrame.BackgroundTransparency = 1
+    RandomFrame.Parent = Container
+    
+    local RandomLabel = Instance.new("TextLabel")
+    RandomLabel.Size = UDim2.new(1, 0, 0, 20)
+    RandomLabel.BackgroundTransparency = 1
+    RandomLabel.Text = "🎲 RETURN RANDOMNESS: " .. Config.ReturnRandomness .. "%"
+    RandomLabel.TextColor3 = Color3.new(1, 1, 1)
+    RandomLabel.Font = Enum.Font.Jura
+    RandomLabel.TextSize = 12
+    RandomLabel.Parent = RandomFrame
+    
+    local RandomSlider = Instance.new("Frame")
+    RandomSlider.Size = UDim2.new(1, 0, 0, 22)
+    RandomSlider.Position = UDim2.new(0, 0, 0, 22)
+    RandomSlider.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+    RandomSlider.Parent = RandomFrame
+    Instance.new("UICorner", RandomSlider).CornerRadius = UDim.new(0, 10)
+    
+    local RandomFill = Instance.new("Frame")
+    RandomFill.Size = UDim2.new(Config.ReturnRandomness / 100, 0, 1, 0)
+    RandomFill.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+    RandomFill.Parent = RandomSlider
+    Instance.new("UICorner", RandomFill).CornerRadius = UDim.new(0, 10)
+    
+    local randomDragging = false
+    RandomSlider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then randomDragging = true end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then randomDragging = false end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if randomDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local pos = math.clamp((input.Position.X - RandomSlider.AbsolutePosition.X) / RandomSlider.AbsoluteSize.X, 0, 1)
+            RandomFill.Size = UDim2.new(pos, 0, 1, 0)
+            local val = math.floor(pos * 100)
+            RandomLabel.Text = "🎲 RETURN RANDOMNESS: " .. val .. "%"
+            Config.ReturnRandomness = val
+            saveConfig()
+        end
+    end)
+    
+    -- Return Delay Slider (0-50 ms)
+    local DelayFrame = Instance.new("Frame")
+    DelayFrame.Size = UDim2.new(1, 0, 0, 50)
+    DelayFrame.BackgroundTransparency = 1
+    DelayFrame.Parent = Container
+    
+    local DelayLabel = Instance.new("TextLabel")
+    DelayLabel.Size = UDim2.new(1, 0, 0, 20)
+    DelayLabel.BackgroundTransparency = 1
+    DelayLabel.Text = "⏱️ RETURN DELAY: " .. Config.ReturnDelay .. " ms"
+    DelayLabel.TextColor3 = Color3.new(1, 1, 1)
+    DelayLabel.Font = Enum.Font.Jura
+    DelayLabel.TextSize = 12
+    DelayLabel.Parent = DelayFrame
+    
+    local DelaySlider = Instance.new("Frame")
+    DelaySlider.Size = UDim2.new(1, 0, 0, 22)
+    DelaySlider.Position = UDim2.new(0, 0, 0, 22)
+    DelaySlider.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+    DelaySlider.Parent = DelayFrame
+    Instance.new("UICorner", DelaySlider).CornerRadius = UDim.new(0, 10)
+    
+    local DelayFill = Instance.new("Frame")
+    DelayFill.Size = UDim2.new(Config.ReturnDelay / 50, 0, 1, 0)
+    DelayFill.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+    DelayFill.Parent = DelaySlider
+    Instance.new("UICorner", DelayFill).CornerRadius = UDim.new(0, 10)
+    
+    local delayDragging = false
+    DelaySlider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then delayDragging = true end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then delayDragging = false end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if delayDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local pos = math.clamp((input.Position.X - DelaySlider.AbsolutePosition.X) / DelaySlider.AbsoluteSize.X, 0, 1)
+            DelayFill.Size = UDim2.new(pos, 0, 1, 0)
+            local val = math.floor(pos * 50)
+            DelayLabel.Text = "⏱️ RETURN DELAY: " .. val .. " ms"
+            Config.ReturnDelay = val
+            saveConfig()
+        end
+    end)
+    
+    -- Bind Button
+    local BindButton = Instance.new("TextButton")
+    BindButton.Size = UDim2.new(1, 0, 0, 35)
+    BindButton.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
+    BindButton.TextColor3 = Color3.new(1, 1, 1)
+    BindButton.Font = Enum.Font.Jura
+    BindButton.TextSize = 14
+    BindButton.Text = "⌨️ BIND: " .. Config.Keybind
+    BindButton.Parent = Container
+    Instance.new("UICorner", BindButton).CornerRadius = UDim.new(0, 6)
+    
+    getgenv().UpdateBindButtonText = function(key)
+        pcall(function() BindButton.Text = "⌨️ BIND: " .. key end)
+    end
+    
+    BindButton.MouseButton1Click:Connect(function()
+        waitingForBind = true
+        BindButton.Text = "⌨️ PRESS ANY KEY..."
+        task.wait(3)
+        if waitingForBind then
+            waitingForBind = false
+            BindButton.Text = "⌨️ BIND: " .. Config.Keybind
+        end
+    end)
+    
+    -- Hide GUI
+    local HideButton = Instance.new("TextButton")
+    HideButton.Size = UDim2.new(1, 0, 0, 35)
+    HideButton.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    HideButton.TextColor3 = Color3.new(1, 1, 1)
+    HideButton.Font = Enum.Font.Jura
+    HideButton.TextSize = 14
+    HideButton.Text = "👁️ HIDE GUI"
+    HideButton.Parent = Container
+    Instance.new("UICorner", HideButton).CornerRadius = UDim.new(0, 6)
+    HideButton.MouseButton1Click:Connect(function()
+        MainFrame.Visible = false
+        notify("GUI hidden. Click F button to show", 2)
+    end)
+    
+    -- Kill GUI
+    local KillButton = Instance.new("TextButton")
+    KillButton.Size = UDim2.new(1, 0, 0, 35)
+    KillButton.BackgroundColor3 = Color3.fromRGB(80, 40, 40)
+    KillButton.TextColor3 = Color3.new(1, 1, 1)
+    KillButton.Font = Enum.Font.Jura
+    KillButton.TextSize = 14
+    KillButton.Text = "💀 DESTROY GUI"
+    KillButton.Parent = Container
+    Instance.new("UICorner", KillButton).CornerRadius = UDim.new(0, 6)
+    KillButton.MouseButton1Click:Connect(function()
+        pcall(function() ScreenGui:Destroy() end)
+        ScreenGui = nil
+        MainFrame = nil
+        CircleButton = nil
+        notify("GUI destroyed. Re-execute script to restore", 2)
+    end)
+    
+    CircleButton.MouseButton1Click:Connect(function()
+        if MainFrame then MainFrame.Visible = not MainFrame.Visible end
+    end)
+end
+
+-- ========== ИНИЦИАЛИЗАЦИЯ ==========
+if getgenv().FlickLoaded then
+    if getgenv().RestoreGUI then getgenv().RestoreGUI() end
+else
+    getgenv().FlickLoaded = true
+    getgenv().FlickToMurderer = flickToMurderer
+    getgenv().RestoreGUI = createGUI
+    
+    setupKeybind()
+    create
