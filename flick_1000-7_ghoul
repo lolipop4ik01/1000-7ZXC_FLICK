@@ -1,17 +1,14 @@
 --[[
-    Flick To Murderer - Максимальная скорость + возврат камеры + поддержка 3 лица
-    Архитектура: Config → SaveSystem → FlickLogic → KeybindSystem → GUI
-    GUI можно убить → логика продолжает работать
+    Flick To Murderer - Максимальная скорость + возврат камеры + поддержка 3 лица + Рандомная часть тела
+    Версия: 5.0
 ]]
 
 -- ========== СЕРВИСЫ ==========
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
-local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -24,12 +21,13 @@ local Config = {
     InstantFlick = true,
     ReturnCamera = false,
     ReturnRandomness = 5,
+    RandomBodyPart = false,
     MainPos = {X = 0.5, Y = 0.5, XOff = -160, YOff = -210},
     CirclePos = {X = 0.85, Y = 0.85, XOff = 0, YOff = 0}
 }
 
 -- ========== СИСТЕМА СОХРАНЕНИЯ ==========
-local CONFIG_FILE = "flick_config_v4.json"
+local CONFIG_FILE = "flick_config_v5.json"
 
 local function saveConfig()
     pcall(function()
@@ -138,6 +136,34 @@ end
 -- ========== ЛОГИКА FLICK ==========
 local lastCameraCFrame = nil
 
+-- Список возможных частей тела для прицеливания
+local BODY_PARTS = {
+    "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso", 
+    "LeftArm", "RightArm", "LeftLeg", "RightLeg"
+}
+
+local function getRandomBodyPart(character)
+    local availableParts = {}
+    for _, partName in ipairs(BODY_PARTS) do
+        local part = character:FindFirstChild(partName)
+        if part and part:IsA("BasePart") then
+            table.insert(availableParts, part)
+        end
+    end
+    
+    -- Если есть части, выбираем случайную
+    if #availableParts > 0 then
+        local randomPart = availableParts[math.random(1, #availableParts)]
+        return randomPart.Position
+    end
+    
+    -- Если ничего не нашли, возвращаем позицию HumanoidRootPart
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if root then return root.Position end
+    
+    return nil
+end
+
 local function findMurderer()
     if game.PlaceId == 142823291 then
         local success, roleData = pcall(function()
@@ -188,33 +214,39 @@ local function autoShoot(murderer)
     if not murderer or not murderer.Character then return end
     local remote = findShootRemote()
     if not remote then return end
-    local murdererRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
-    if not murdererRoot then return end
+    
+    -- Получаем позицию для выстрела (рандомная часть тела или HumanoidRootPart)
+    local targetPos
+    if Config.RandomBodyPart then
+        targetPos = getRandomBodyPart(murderer.Character)
+    else
+        local murdererRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
+        if murdererRoot then targetPos = murdererRoot.Position end
+    end
+    
+    if not targetPos then return end
+    
     pcall(function()
         remote:FireServer({
             workspace.CurrentCamera.CFrame,
-            CFrame.new(murdererRoot.Position),
+            CFrame.new(targetPos),
         })
     end)
 end
 
--- Функция возврата камеры с рандомным отклонением
 local function returnCameraWithRandomness()
     if not Config.ReturnCamera or not lastCameraCFrame then return end
     
     local cam = workspace.CurrentCamera
     local targetCFrame = lastCameraCFrame
     
-    -- Добавляем рандомное отклонение
     local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomness / 100)
     local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomness / 100)
     
-    -- Получаем направления камеры
     local right = targetCFrame.RightVector
     local up = targetCFrame.UpVector
     local look = targetCFrame.LookVector
     
-    -- Создаем новое направление с отклонением
     local newLook = (look + right * randomX + up * randomY).Unit
     local newCFrame = CFrame.lookAt(targetCFrame.Position, targetCFrame.Position + newLook)
     
@@ -240,7 +272,6 @@ local function returnCameraWithRandomness()
     lastCameraCFrame = nil
 end
 
--- ОСНОВНАЯ ФУНКЦИЯ FLICK (С ПОДДЕРЖКОЙ 3 ЛИЦА)
 local function flickToMurderer()
     if not Config.Enabled then
         notify("Flick is disabled!", 1)
@@ -260,31 +291,38 @@ local function flickToMurderer()
     local rootPart = char:FindFirstChild("HumanoidRootPart")
     if not rootPart then return end
     
-    -- Сохраняем текущую позицию камеры перед flick
     if Config.ReturnCamera then
         lastCameraCFrame = cam.CFrame
     end
     
-    local targetPos = murderer.Character.HumanoidRootPart.Position
+    -- Получаем позицию цели (рандомная часть тела или HumanoidRootPart)
+    local targetPos
+    if Config.RandomBodyPart then
+        targetPos = getRandomBodyPart(murderer.Character)
+        if not targetPos then
+            local murdererRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
+            if murdererRoot then targetPos = murdererRoot.Position end
+        end
+    else
+        local murdererRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
+        if murdererRoot then targetPos = murdererRoot.Position end
+    end
     
-    -- ФИКС ДЛЯ 3 ЛИЦА: определяем режим камеры
+    if not targetPos then
+        notify("Cannot get target position!", 1)
+        return
+    end
+    
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
     local cameraPos = cam.CFrame.Position
-    
-    -- Определяем, от 1 лица или 3 лица
     local isFirstPerson = (cameraPos - headPos).Magnitude < 5
     
     local newCFrame
     if isFirstPerson then
-        -- От 1 лица: стандартное поведение
         newCFrame = CFrame.lookAt(cameraPos, targetPos)
     else
-        -- От 3 лица: поворачиваем камеру вокруг персонажа
-        local directionToTarget = (targetPos - rootPart.Position).Unit
-        local currentDirection = (cameraPos - rootPart.Position).Unit
-        
-        -- Вычисляем новую позицию камеры на той же дистанции
         local distance = (cameraPos - rootPart.Position).Magnitude
+        local directionToTarget = (targetPos - rootPart.Position).Unit
         local newCameraPos = rootPart.Position + directionToTarget * distance
         newCFrame = CFrame.lookAt(newCameraPos, targetPos)
     end
@@ -310,7 +348,6 @@ local function flickToMurderer()
     
     autoShoot(murderer)
     
-    -- Возвращаем камеру после выстрела
     if Config.ReturnCamera then
         task.wait(0.05)
         returnCameraWithRandomness()
@@ -359,7 +396,6 @@ local function createGUI()
     ScreenGui.ResetOnSpawn = false
     ScreenGui.Parent = getSafeParent()
     
-    -- КРУГЛАЯ КНОПКА-ТОГГЛ
     CircleButton = Instance.new("TextButton")
     CircleButton.Size = UDim2.new(0, 50, 0, 50)
     CircleButton.Position = UDim2.new(Config.CirclePos.X, Config.CirclePos.XOff, Config.CirclePos.Y, Config.CirclePos.YOff)
@@ -370,22 +406,18 @@ local function createGUI()
     CircleButton.TextSize = 20
     CircleButton.Parent = ScreenGui
     Instance.new("UICorner", CircleButton).CornerRadius = UDim.new(1, 0)
-    
     makeDraggable(CircleButton, "CirclePos")
     
-    -- ГЛАВНОЕ ОКНО
     MainFrame = Instance.new("Frame")
-    MainFrame.Size = UDim2.new(0, 260, 0, 400)
+    MainFrame.Size = UDim2.new(0, 260, 0, 470)
     MainFrame.Position = UDim2.new(Config.MainPos.X, Config.MainPos.XOff, Config.MainPos.Y, Config.MainPos.YOff)
     MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
     MainFrame.BorderSizePixel = 0
     MainFrame.Visible = true
     MainFrame.Parent = ScreenGui
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
-    
     makeDraggable(MainFrame, "MainPos")
     
-    -- Заголовок
     local Title = Instance.new("TextLabel")
     Title.Size = UDim2.new(1, 0, 0, 35)
     Title.Position = UDim2.new(0, 0, 0, 5)
@@ -396,7 +428,6 @@ local function createGUI()
     Title.TextSize = 16
     Title.Parent = MainFrame
     
-    -- Контейнер
     local Container = Instance.new("Frame")
     Container.Size = UDim2.new(1, -20, 1, -50)
     Container.Position = UDim2.new(0, 10, 0, 45)
@@ -418,7 +449,6 @@ local function createGUI()
     FlickToggle.Text = "🔘 FLICK: " .. (Config.Enabled and "ON" or "OFF")
     FlickToggle.Parent = Container
     Instance.new("UICorner", FlickToggle).CornerRadius = UDim.new(0, 6)
-    
     FlickToggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         FlickToggle.Text = "🔘 FLICK: " .. (Config.Enabled and "ON" or "OFF")
@@ -437,16 +467,15 @@ local function createGUI()
     InstantToggle.Text = "⚡ INSTANT FLICK: " .. (Config.InstantFlick and "ON" or "OFF")
     InstantToggle.Parent = Container
     Instance.new("UICorner", InstantToggle).CornerRadius = UDim.new(0, 6)
-    
     InstantToggle.MouseButton1Click:Connect(function()
         Config.InstantFlick = not Config.InstantFlick
         InstantToggle.Text = "⚡ INSTANT FLICK: " .. (Config.InstantFlick and "ON" or "OFF")
         InstantToggle.BackgroundColor3 = Config.InstantFlick and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
         saveConfig()
-        notify(Config.InstantFlick and "Instant flick mode ON - мгновенный поворот" or "Animation mode ON - с визуальным эффектом", 2)
+        notify(Config.InstantFlick and "Instant flick mode ON" or "Animation mode ON", 2)
     end)
     
-    -- Slider Speed
+    -- Speed Slider
     local SpeedFrame = Instance.new("Frame")
     SpeedFrame.Size = UDim2.new(1, 0, 0, 50)
     SpeedFrame.BackgroundTransparency = 1
@@ -476,14 +505,10 @@ local function createGUI()
     
     local speedDragging = false
     SpeedSlider.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            speedDragging = true
-        end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then speedDragging = true end
     end)
     UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            speedDragging = false
-        end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then speedDragging = false end
     end)
     UserInputService.InputChanged:Connect(function(input)
         if speedDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
@@ -496,122 +521,19 @@ local function createGUI()
         end
     end)
     
-    -- Toggle AutoShoot
-    local AutoShootToggle = Instance.new("TextButton")
-    AutoShootToggle.Size = UDim2.new(1, 0, 0, 35)
-    AutoShootToggle.BackgroundColor3 = (Config.AutoShoot and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45))
-    AutoShootToggle.TextColor3 = Color3.new(1, 1, 1)
-    AutoShootToggle.Font = Enum.Font.Jura
-    AutoShootToggle.TextSize = 14
-    AutoShootToggle.Text = "🔫 AUTO SHOOT: " .. (Config.AutoShoot and "ON" or "OFF")
-    AutoShootToggle.Parent = Container
-    Instance.new("UICorner", AutoShootToggle).CornerRadius = UDim.new(0, 6)
-    
-    AutoShootToggle.MouseButton1Click:Connect(function()
-        Config.AutoShoot = not Config.AutoShoot
-        AutoShootToggle.Text = "🔫 AUTO SHOOT: " .. (Config.AutoShoot and "ON" or "OFF")
-        AutoShootToggle.BackgroundColor3 = Config.AutoShoot and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
+    -- Random Body Part Toggle (НОВАЯ ФУНКЦИЯ)
+    local RandomBodyToggle = Instance.new("TextButton")
+    RandomBodyToggle.Size = UDim2.new(1, 0, 0, 35)
+    RandomBodyToggle.BackgroundColor3 = Config.RandomBodyPart and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
+    RandomBodyToggle.TextColor3 = Color3.new(1, 1, 1)
+    RandomBodyToggle.Font = Enum.Font.Jura
+    RandomBodyToggle.TextSize = 14
+    RandomBodyToggle.Text = "🎲 RANDOM BODY PART: " .. (Config.RandomBodyPart and "ON" or "OFF")
+    RandomBodyToggle.Parent = Container
+    Instance.new("UICorner", RandomBodyToggle).CornerRadius = UDim.new(0, 6)
+    RandomBodyToggle.MouseButton1Click:Connect(function()
+        Config.RandomBodyPart = not Config.RandomBodyPart
+        RandomBodyToggle.Text = "🎲 RANDOM BODY PART: " .. (Config.RandomBodyPart and "ON" or "OFF")
+        RandomBodyToggle.BackgroundColor3 = Config.RandomBodyPart and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
         saveConfig()
-        notify(Config.AutoShoot and "Auto Shoot ON" or "Auto Shoot OFF", 1)
-    end)
-    
-    -- Toggle Return Camera
-    local ReturnToggle = Instance.new("TextButton")
-    ReturnToggle.Size = UDim2.new(1, 0, 0, 35)
-    ReturnToggle.BackgroundColor3 = Config.ReturnCamera and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-    ReturnToggle.TextColor3 = Color3.new(1, 1, 1)
-    ReturnToggle.Font = Enum.Font.Jura
-    ReturnToggle.TextSize = 14
-    ReturnToggle.Text = "🔄 RETURN CAMERA: " .. (Config.ReturnCamera and "ON" or "OFF")
-    ReturnToggle.Parent = Container
-    Instance.new("UICorner", ReturnToggle).CornerRadius = UDim.new(0, 6)
-    
-    ReturnToggle.MouseButton1Click:Connect(function()
-        Config.ReturnCamera = not Config.ReturnCamera
-        ReturnToggle.Text = "🔄 RETURN CAMERA: " .. (Config.ReturnCamera and "ON" or "OFF")
-        ReturnToggle.BackgroundColor3 = Config.Return loaded - MAXIMUM SPEED! Instant flick available.")
--- УЛЬТРАБЫСТРЫЙ FLICK + возврат камеры (ИСПРАВЛЕН ДЛЯ 3 ЛИЦА)
-local function flickToMurderer()
-    if not Config.Enabled then
-        notify("Flick is disabled!", 1)
-        return
-    end
-    
-    local murderer = findMurderer()
-    if not murderer or not murderer.Character or not murderer.Character:FindFirstChild("HumanoidRootPart") then
-        notify("Murderer not found!", 1)
-        return
-    end
-    
-    local cam = workspace.CurrentCamera
-    local char = LocalPlayer.Character
-    if not char then return end
-    
-    local rootPart = char:FindFirstChild("HumanoidRootPart")
-    if not rootPart then return end
-    
-    -- Сохраняем текущую позицию камеры перед flick
-    if Config.ReturnCamera then
-        lastCameraCFrame = cam.CFrame
-    end
-    
-    local targetPos = murderer.Character.HumanoidRootPart.Position
-    
-    -- ФИКС ДЛЯ 3 ЛИЦА: используем позицию головы/персонажа вместо позиции камеры
-    local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
-    local cameraPos = cam.CFrame.Position
-    
-    -- Определяем, от 1 лица или 3 лица
-    local isFirstPerson = (cameraPos - headPos).Magnitude < 5
-    
-    local newCFrame
-    if isFirstPerson then
-        -- От 1 лица: стандартное поведение
-        newCFrame = CFrame.lookAt(cameraPos, targetPos)
-    else
-        -- От 3 лица: поворачиваем камеру вокруг персонажа
-        local directionToTarget = (targetPos - rootPart.Position).Unit
-        local currentDirection = (cameraPos - rootPart.Position).Unit
-        
-        -- Находим угол между текущим направлением и целью
-        local dot = currentDirection:Dot(directionToTarget)
-        local angle = math.acos(math.clamp(dot, -1, 1))
-        
-        -- Если угол слишком большой, поворачиваем камеру плавно
-        if angle > 0.1 then
-            -- Вычисляем новую позицию камеры на той же дистанции
-            local distance = (cameraPos - rootPart.Position).Magnitude
-            local newCameraPos = rootPart.Position + directionToTarget * distance
-            newCFrame = CFrame.lookAt(newCameraPos, targetPos)
-        else
-            newCFrame = CFrame.lookAt(cameraPos, targetPos)
-        end
-    end
-    
-    if Config.InstantFlick then
-        cam.CFrame = newCFrame
-    else
-        local oldCFrame = cam.CFrame
-        local currentLook = oldCFrame.LookVector
-        local targetLook = (targetPos - oldCFrame.Position).Unit
-        local dot = math.clamp(currentLook:Dot(targetLook), -1, 1)
-        local angleDist = math.acos(dot)
-        local angularSpeed = Config.FlickSpeed * 10 * math.pi
-        local totalTime = math.max(angleDist / angularSpeed, 0.016)
-        local steps = 2
-        local waitTime = totalTime / steps
-        
-        for i = 1, steps do
-            cam.CFrame = oldCFrame:Lerp(newCFrame, i / steps)
-            task.wait(waitTime)
-        end
-    end
-    
-    autoShoot(murderer)
-    
-    -- Возвращаем камеру после выстрела
-    if Config.ReturnCamera then
-        task.wait(0.05)
-        returnCameraWithRandomness()
-    end
-end
+        notify(Config.RandomBodyPart and "Random body part ON - цель в разные части тела" or 
