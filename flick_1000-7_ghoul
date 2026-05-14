@@ -1,5 +1,5 @@
 --[[
-    Flick To Murderer - Максимальная скорость + возврат камеры
+    Flick To Murderer - Максимальная скорость + возврат камеры + поддержка 3 лица
     Архитектура: Config → SaveSystem → FlickLogic → KeybindSystem → GUI
     GUI можно убить → логика продолжает работать
 ]]
@@ -219,10 +219,8 @@ local function returnCameraWithRandomness()
     local newCFrame = CFrame.lookAt(targetCFrame.Position, targetCFrame.Position + newLook)
     
     if Config.InstantFlick then
-        -- Мгновенный возврат с отклонением
         cam.CFrame = newCFrame
     else
-        -- Плавный возврат с отклонением
         local oldCFrame = cam.CFrame
         local currentLook = oldCFrame.LookVector
         local targetLook = newCFrame.LookVector
@@ -242,7 +240,7 @@ local function returnCameraWithRandomness()
     lastCameraCFrame = nil
 end
 
--- УЛЬТРАБЫСТРЫЙ FLICK + возврат камеры
+-- ОСНОВНАЯ ФУНКЦИЯ FLICK (С ПОДДЕРЖКОЙ 3 ЛИЦА)
 local function flickToMurderer()
     if not Config.Enabled then
         notify("Flick is disabled!", 1)
@@ -259,19 +257,42 @@ local function flickToMurderer()
     local char = LocalPlayer.Character
     if not char then return end
     
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return end
+    
     -- Сохраняем текущую позицию камеры перед flick
     if Config.ReturnCamera then
         lastCameraCFrame = cam.CFrame
     end
     
     local targetPos = murderer.Character.HumanoidRootPart.Position
-    local oldCFrame = cam.CFrame
     
-    -- Мгновенный поворот или анимация
-    if Config.InstantFlick then
-        cam.CFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
+    -- ФИКС ДЛЯ 3 ЛИЦА: определяем режим камеры
+    local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
+    local cameraPos = cam.CFrame.Position
+    
+    -- Определяем, от 1 лица или 3 лица
+    local isFirstPerson = (cameraPos - headPos).Magnitude < 5
+    
+    local newCFrame
+    if isFirstPerson then
+        -- От 1 лица: стандартное поведение
+        newCFrame = CFrame.lookAt(cameraPos, targetPos)
     else
-        local targetCFrame = CFrame.lookAt(oldCFrame.Position, targetPos)
+        -- От 3 лица: поворачиваем камеру вокруг персонажа
+        local directionToTarget = (targetPos - rootPart.Position).Unit
+        local currentDirection = (cameraPos - rootPart.Position).Unit
+        
+        -- Вычисляем новую позицию камеры на той же дистанции
+        local distance = (cameraPos - rootPart.Position).Magnitude
+        local newCameraPos = rootPart.Position + directionToTarget * distance
+        newCFrame = CFrame.lookAt(newCameraPos, targetPos)
+    end
+    
+    if Config.InstantFlick then
+        cam.CFrame = newCFrame
+    else
+        local oldCFrame = cam.CFrame
         local currentLook = oldCFrame.LookVector
         local targetLook = (targetPos - oldCFrame.Position).Unit
         local dot = math.clamp(currentLook:Dot(targetLook), -1, 1)
@@ -282,7 +303,7 @@ local function flickToMurderer()
         local waitTime = totalTime / steps
         
         for i = 1, steps do
-            cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps)
+            cam.CFrame = oldCFrame:Lerp(newCFrame, i / steps)
             task.wait(waitTime)
         end
     end
@@ -494,7 +515,7 @@ local function createGUI()
         notify(Config.AutoShoot and "Auto Shoot ON" or "Auto Shoot OFF", 1)
     end)
     
-    -- Toggle Return Camera (НОВЫЙ)
+    -- Toggle Return Camera
     local ReturnToggle = Instance.new("TextButton")
     ReturnToggle.Size = UDim2.new(1, 0, 0, 35)
     ReturnToggle.BackgroundColor3 = Config.ReturnCamera and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
@@ -508,135 +529,8 @@ local function createGUI()
     ReturnToggle.MouseButton1Click:Connect(function()
         Config.ReturnCamera = not Config.ReturnCamera
         ReturnToggle.Text = "🔄 RETURN CAMERA: " .. (Config.ReturnCamera and "ON" or "OFF")
-        ReturnToggle.BackgroundColor3 = Config.ReturnCamera and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-        saveConfig()
-        notify(Config.ReturnCamera and "Camera return ON - камера вернется назад" or "Camera return OFF", 2)
-    end)
-    
-    -- Slider Return Randomness (НОВЫЙ)
-    local RandomFrame = Instance.new("Frame")
-    RandomFrame.Size = UDim2.new(1, 0, 0, 50)
-    RandomFrame.BackgroundTransparency = 1
-    RandomFrame.Parent = Container
-    
-    local RandomLabel = Instance.new("TextLabel")
-    RandomLabel.Size = UDim2.new(1, 0, 0, 20)
-    RandomLabel.BackgroundTransparency = 1
-    RandomLabel.Text = "🎲 RETURN RANDOMNESS: " .. Config.ReturnRandomness .. "%"
-    RandomLabel.TextColor3 = Color3.new(1, 1, 1)
-    RandomLabel.Font = Enum.Font.Jura
-    RandomLabel.TextSize = 12
-    RandomLabel.Parent = RandomFrame
-    
-    local RandomSl        
-        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
-        frame:TweenPosition(UDim2.new(0.5, -125, 0.75, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.3, true)
-        task.wait(duration)
-        frame:TweenPosition(UDim2.new(0.5, -125, 0.85, 0), Enum.EasingDirection.In, Enum.EasingStyle.Quad, 0.3, true)
-        task.wait(0.3)
-        frame:Destroy()
-    end)
-end
-
--- ========== DRAG SYSTEM ==========
-local function makeDraggable(gui, saveKey)
-    local dragging = false
-    local dragStart = nil
-    local startPos = nil
-    
-    gui.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            dragStart = input.Position
-            startPos = gui.Position
-        end
-    end)
-    
-    gui.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
-            dragging = false
-            if saveKey and Config[saveKey] then
-                Config[saveKey] = {
-                    X = gui.Position.X.Scale,
-                    Y = gui.Position.Y.Scale,
-                    XOff = gui.Position.X.Offset,
-                    YOff = gui.Position.Y.Offset
-                }
-                saveConfig()
-            end
-        end
-    end)
-    
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-            local delta = input.Position - dragStart
-            gui.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end)
-end
-
--- ========== ЛОГИКА FLICK ==========
-local function findMurderer()
-    if game.PlaceId == 142823291 then
-        local success, roleData = pcall(function()
-            local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
-            if remote and remote:IsA("RemoteFunction") then
-                return remote:InvokeServer()
-            end
-        end)
-        if success and roleData then
-            for playerName, data in pairs(roleData) do
-                if data.Role == "Murderer" and not data.Killed and not data.Dead then
-                    local p = Players:FindFirstChild(playerName)
-                    if p then return p end
-                end
-            end
-        end
-        return nil
-    else
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer and player.Character then
-                local char = player.Character
-                local root = char:FindFirstChild("HumanoidRootPart")
-                local hum = char:FindFirstChild("Humanoid")
-                if root and hum and hum.Health > 0 then
-                    local bp = player:FindFirstChild("Backpack")
-                    if bp and bp:FindFirstChild("Knife") then return player end
-                    for _, tool in ipairs(char:GetChildren()) do
-                        if tool:IsA("Tool") and tool.Name == "Knife" then return player end
-                    end
-                end
-            end
-        end
-        return nil
-    end
-end
-
-local function findShootRemote()
-    local ns = ReplicatedStorage:FindFirstChild("Axioria Solver was here.")
-    if not ns then return nil end
-    for _, v in ipairs(ns:GetChildren()) do
-        if v:IsA("RemoteEvent") then return v end
-    end
-    return nil
-end
-
-local function autoShoot(murderer)
-    if not Config.AutoShoot then return end
-    if not murderer or not murderer.Character then return end
-    local remote = findShootRemote()
-    if not remote then return end
-    local murdererRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
-    if not murdererRoot then return end
-    pcall(function()
-        remote:FireServer({
-            workspace.CurrentCamera.CFrame,
-            CFrame.new(murdererRoot.Position),
-        })
-    end)
-end
-
--- УЛЬТРАБЫСТРЫЙ FLICK (переписанная логика)
+        ReturnToggle.BackgroundColor3 = Config.Return loaded - MAXIMUM SPEED! Instant flick available.")
+-- УЛЬТРАБЫСТРЫЙ FLICK + возврат камеры (ИСПРАВЛЕН ДЛЯ 3 ЛИЦА)
 local function flickToMurderer()
     if not Config.Enabled then
         notify("Flick is disabled!", 1)
@@ -653,322 +547,71 @@ local function flickToMurderer()
     local char = LocalPlayer.Character
     if not char then return end
     
-    local targetPos = murderer.Character.HumanoidRootPart.Position
-    local oldCFrame = cam.CFrame
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return end
     
-    -- НОВАЯ ЛОГИКА: мгновенный поворот
-    if Config.InstantFlick then
-        -- Вариант 1: Самый быстрый - прямая установка CFrame
-        cam.CFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
+    -- Сохраняем текущую позицию камеры перед flick
+    if Config.ReturnCamera then
+        lastCameraCFrame = cam.CFrame
+    end
+    
+    local targetPos = murderer.Character.HumanoidRootPart.Position
+    
+    -- ФИКС ДЛЯ 3 ЛИЦА: используем позицию головы/персонажа вместо позиции камеры
+    local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
+    local cameraPos = cam.CFrame.Position
+    
+    -- Определяем, от 1 лица или 3 лица
+    local isFirstPerson = (cameraPos - headPos).Magnitude < 5
+    
+    local newCFrame
+    if isFirstPerson then
+        -- От 1 лица: стандартное поведение
+        newCFrame = CFrame.lookAt(cameraPos, targetPos)
     else
-        -- Вариант 2: Ультрабыстрый с минимальной анимацией (для совместимости)
-        local targetCFrame = CFrame.lookAt(oldCFrame.Position, targetPos)
+        -- От 3 лица: поворачиваем камеру вокруг персонажа
+        local directionToTarget = (targetPos - rootPart.Position).Unit
+        local currentDirection = (cameraPos - rootPart.Position).Unit
         
-        -- Увеличенная скорость: FlickSpeed * 10 * π (ранее было 0.5 * π)
+        -- Находим угол между текущим направлением и целью
+        local dot = currentDirection:Dot(directionToTarget)
+        local angle = math.acos(math.clamp(dot, -1, 1))
+        
+        -- Если угол слишком большой, поворачиваем камеру плавно
+        if angle > 0.1 then
+            -- Вычисляем новую позицию камеры на той же дистанции
+            local distance = (cameraPos - rootPart.Position).Magnitude
+            local newCameraPos = rootPart.Position + directionToTarget * distance
+            newCFrame = CFrame.lookAt(newCameraPos, targetPos)
+        else
+            newCFrame = CFrame.lookAt(cameraPos, targetPos)
+        end
+    end
+    
+    if Config.InstantFlick then
+        cam.CFrame = newCFrame
+    else
+        local oldCFrame = cam.CFrame
         local currentLook = oldCFrame.LookVector
         local targetLook = (targetPos - oldCFrame.Position).Unit
         local dot = math.clamp(currentLook:Dot(targetLook), -1, 1)
         local angleDist = math.acos(dot)
         local angularSpeed = Config.FlickSpeed * 10 * math.pi
         local totalTime = math.max(angleDist / angularSpeed, 0.016)
-        
-        -- Всего 2 шага для минимальной задержки
         local steps = 2
         local waitTime = totalTime / steps
         
         for i = 1, steps do
-            cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps)
+            cam.CFrame = oldCFrame:Lerp(newCFrame, i / steps)
             task.wait(waitTime)
         end
     end
     
     autoShoot(murderer)
-end
-
--- ========== KEYBIND SYSTEM ==========
-local waitingForBind = false
-
-local function setupKeybind()
-    local connection
-    connection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
-        
-        if waitingForBind then
-            waitingForBind = false
-            if input.KeyCode ~= Enum.KeyCode.Unknown then
-                Config.Keybind = input.KeyCode.Name
-                saveConfig()
-                notify("Keybind set to: " .. Config.Keybind, 1)
-                if getgenv().UpdateBindButtonText then
-                    getgenv().UpdateBindButtonText(Config.Keybind)
-                end
-            end
-            return
-        end
-        
-        if input.KeyCode == Enum.KeyCode[Config.Keybind] then
-            flickToMurderer()
-        end
-    end)
     
-    getgenv().KeybindConnection = connection
-end
-
--- ========== GUI ==========
-local ScreenGui = nil
-local MainFrame = nil
-local CircleButton = nil
-
-local function createGUI()
-    if ScreenGui then pcall(function() ScreenGui:Destroy() end) end
-    
-    ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "FlickGUI"
-    ScreenGui.ResetOnSpawn = false
-    ScreenGui.Parent = getSafeParent()
-    
-    -- КРУГЛАЯ КНОПКА-ТОГГЛ
-    CircleButton = Instance.new("TextButton")
-    CircleButton.Size = UDim2.new(0, 50, 0, 50)
-    CircleButton.Position = UDim2.new(Config.CirclePos.X, Config.CirclePos.XOff, Config.CirclePos.Y, Config.CirclePos.YOff)
-    CircleButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-    CircleButton.Text = "F"
-    CircleButton.TextColor3 = Color3.new(1, 1, 1)
-    CircleButton.Font = Enum.Font.Jura
-    CircleButton.TextSize = 20
-    CircleButton.Parent = ScreenGui
-    Instance.new("UICorner", CircleButton).CornerRadius = UDim.new(1, 0)
-    
-    makeDraggable(CircleButton, "CirclePos")
-    
-    -- ГЛАВНОЕ ОКНО
-    MainFrame = Instance.new("Frame")
-    MainFrame.Size = UDim2.new(0, 260, 0, 320)
-    MainFrame.Position = UDim2.new(Config.MainPos.X, Config.MainPos.XOff, Config.MainPos.Y, Config.MainPos.YOff)
-    MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-    MainFrame.BorderSizePixel = 0
-    MainFrame.Visible = true
-    MainFrame.Parent = ScreenGui
-    Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
-    
-    makeDraggable(MainFrame, "MainPos")
-    
-    -- Заголовок
-    local Title = Instance.new("TextLabel")
-    Title.Size = UDim2.new(1, 0, 0, 35)
-    Title.Position = UDim2.new(0, 0, 0, 5)
-    Title.BackgroundTransparency = 1
-    Title.Text = "⚡ FLICK TO MURDERER"
-    Title.TextColor3 = Color3.fromRGB(255, 100, 100)
-    Title.Font = Enum.Font.Jura
-    Title.TextSize = 16
-    Title.Parent = MainFrame
-    
-    -- Контейнер
-    local Container = Instance.new("Frame")
-    Container.Size = UDim2.new(1, -20, 1, -50)
-    Container.Position = UDim2.new(0, 10, 0, 45)
-    Container.BackgroundTransparency = 1
-    Container.Parent = MainFrame
-    
-    local Layout = Instance.new("UIListLayout")
-    Layout.Padding = UDim.new(0, 8)
-    Layout.SortOrder = Enum.SortOrder.LayoutOrder
-    Layout.Parent = Container
-    
-    -- Toggle Flick
-    local FlickToggle = Instance.new("TextButton")
-    FlickToggle.Size = UDim2.new(1, 0, 0, 35)
-    FlickToggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-    FlickToggle.TextColor3 = Color3.new(1, 1, 1)
-    FlickToggle.Font = Enum.Font.Jura
-    FlickToggle.TextSize = 14
-    FlickToggle.Text = "🔘 FLICK: " .. (Config.Enabled and "ON" or "OFF")
-    FlickToggle.Parent = Container
-    Instance.new("UICorner", FlickToggle).CornerRadius = UDim.new(0, 6)
-    
-    FlickToggle.MouseButton1Click:Connect(function()
-        Config.Enabled = not Config.Enabled
-        FlickToggle.Text = "🔘 FLICK: " .. (Config.Enabled and "ON" or "OFF")
-        FlickToggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-        saveConfig()
-        notify(Config.Enabled and "Flick enabled" or "Flick disabled", 1)
-    end)
-    
-    -- Instant Toggle (НОВЫЙ ПЕРЕКЛЮЧАТЕЛЬ)
-    local InstantToggle = Instance.new("TextButton")
-    InstantToggle.Size = UDim2.new(1, 0, 0, 35)
-    InstantToggle.BackgroundColor3 = Config.InstantFlick and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-    InstantToggle.TextColor3 = Color3.new(1, 1, 1)
-    InstantToggle.Font = Enum.Font.Jura
-    InstantToggle.TextSize = 14
-    InstantToggle.Text = "⚡ INSTANT FLICK: " .. (Config.InstantFlick and "ON" or "OFF")
-    InstantToggle.Parent = Container
-    Instance.new("UICorner", InstantToggle).CornerRadius = UDim.new(0, 6)
-    
-    InstantToggle.MouseButton1Click:Connect(function()
-        Config.InstantFlick = not Config.InstantFlick
-        InstantToggle.Text = "⚡ INSTANT FLICK: " .. (Config.InstantFlick and "ON" or "OFF")
-        InstantToggle.BackgroundColor3 = Config.InstantFlick and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-        saveConfig()
-        notify(Config.InstantFlick and "Instant flick mode ON - мгновенный поворот" or "Animation mode ON - с визуальным эффектом", 2)
-    end)
-    
-    -- Slider Speed (диапазон 1-200)
-    local SpeedFrame = Instance.new("Frame")
-    SpeedFrame.Size = UDim2.new(1, 0, 0, 50)
-    SpeedFrame.BackgroundTransparency = 1
-    SpeedFrame.Parent = Container
-    
-    local SpeedLabel = Instance.new("TextLabel")
-    SpeedLabel.Size = UDim2.new(1, 0, 0, 20)
-    SpeedLabel.BackgroundTransparency = 1
-    SpeedLabel.Text = "🎚️ SPEED: " .. Config.FlickSpeed
-    SpeedLabel.TextColor3 = Color3.new(1, 1, 1)
-    SpeedLabel.Font = Enum.Font.Jura
-    SpeedLabel.TextSize = 12
-    SpeedLabel.Parent = SpeedFrame
-    
-    local SpeedSlider = Instance.new("Frame")
-    SpeedSlider.Size = UDim2.new(1, 0, 0, 22)
-    SpeedSlider.Position = UDim2.new(0, 0, 0, 22)
-    SpeedSlider.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
-    SpeedSlider.Parent = SpeedFrame
-    Instance.new("UICorner", SpeedSlider).CornerRadius = UDim.new(0, 10)
-    
-    local SpeedFill = Instance.new("Frame")
-    SpeedFill.Size = UDim2.new((Config.FlickSpeed - 1) / 199, 0, 1, 0)
-    SpeedFill.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-    SpeedFill.Parent = SpeedSlider
-    Instance.new("UICorner", SpeedFill).CornerRadius = UDim.new(0, 10)
-    
-    local speedDragging = false
-    SpeedSlider.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            speedDragging = true
-        end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            speedDragging = false
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if speedDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-            local pos = math.clamp((input.Position.X - SpeedSlider.AbsolutePosition.X) / SpeedSlider.AbsoluteSize.X, 0, 1)
-            SpeedFill.Size = UDim2.new(pos, 0, 1, 0)
-            local val = math.floor(1 + pos * 199) -- Диапазон 1-200
-            SpeedLabel.Text = "🎚️ SPEED: " .. val
-            Config.FlickSpeed = val
-            saveConfig()
-        end
-    end)
-    
-    -- Toggle AutoShoot
-    local AutoShootToggle = Instance.new("TextButton")
-    AutoShootToggle.Size = UDim2.new(1, 0, 0, 35)
-    AutoShootToggle.BackgroundColor3 = (Config.AutoShoot and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45))
-    AutoShootToggle.TextColor3 = Color3.new(1, 1, 1)
-    AutoShootToggle.Font = Enum.Font.Jura
-    AutoShootToggle.TextSize = 14
-    AutoShootToggle.Text = "🔫 AUTO SHOOT: " .. (Config.AutoShoot and "ON" or "OFF")
-    AutoShootToggle.Parent = Container
-    Instance.new("UICorner", AutoShootToggle).CornerRadius = UDim.new(0, 6)
-    
-    AutoShootToggle.MouseButton1Click:Connect(function()
-        Config.AutoShoot = not Config.AutoShoot
-        AutoShootToggle.Text = "🔫 AUTO SHOOT: " .. (Config.AutoShoot and "ON" or "OFF")
-        AutoShootToggle.BackgroundColor3 = Config.AutoShoot and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-        saveConfig()
-        notify(Config.AutoShoot and "Auto Shoot ON" or "Auto Shoot OFF", 1)
-    end)
-    
-    -- Bind Button
-    local BindButton = Instance.new("TextButton")
-    BindButton.Size = UDim2.new(1, 0, 0, 35)
-    BindButton.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
-    BindButton.TextColor3 = Color3.new(1, 1, 1)
-    BindButton.Font = Enum.Font.Jura
-    BindButton.TextSize = 14
-    BindButton.Text = "⌨️ BIND: " .. Config.Keybind
-    BindButton.Parent = Container
-    Instance.new("UICorner", BindButton).CornerRadius = UDim.new(0, 6)
-    
-    getgenv().UpdateBindButtonText = function(key)
-        pcall(function()
-            BindButton.Text = "⌨️ BIND: " .. key
-        end)
+    -- Возвращаем камеру после выстрела
+    if Config.ReturnCamera then
+        task.wait(0.05)
+        returnCameraWithRandomness()
     end
-    
-    BindButton.MouseButton1Click:Connect(function()
-        waitingForBind = true
-        BindButton.Text = "⌨️ PRESS ANY KEY..."
-        task.wait(3)
-        if waitingForBind then
-            waitingForBind = false
-            BindButton.Text = "⌨️ BIND: " .. Config.Keybind
-        end
-    end)
-    
-    -- Hide GUI
-    local HideButton = Instance.new("TextButton")
-    HideButton.Size = UDim2.new(1, 0, 0, 35)
-    HideButton.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
-    HideButton.TextColor3 = Color3.new(1, 1, 1)
-    HideButton.Font = Enum.Font.Jura
-    HideButton.TextSize = 14
-    HideButton.Text = "👁️ HIDE GUI"
-    HideButton.Parent = Container
-    Instance.new("UICorner", HideButton).CornerRadius = UDim.new(0, 6)
-    
-    HideButton.MouseButton1Click:Connect(function()
-        MainFrame.Visible = false
-        notify("GUI hidden. Click F button to show", 2)
-    end)
-    
-    -- Kill GUI
-    local KillButton = Instance.new("TextButton")
-    KillButton.Size = UDim2.new(1, 0, 0, 35)
-    KillButton.BackgroundColor3 = Color3.fromRGB(80, 40, 40)
-    KillButton.TextColor3 = Color3.new(1, 1, 1)
-    KillButton.Font = Enum.Font.Jura
-    KillButton.TextSize = 14
-    KillButton.Text = "💀 DESTROY GUI"
-    KillButton.Parent = Container
-    Instance.new("UICorner", KillButton).CornerRadius = UDim.new(0, 6)
-    
-    KillButton.MouseButton1Click:Connect(function()
-        pcall(function() ScreenGui:Destroy() end)
-        ScreenGui = nil
-        MainFrame = nil
-        CircleButton = nil
-        notify("GUI destroyed. Re-execute script to restore", 2)
-    end)
-    
-    -- Круглая кнопка для показа GUI
-    CircleButton.MouseButton1Click:Connect(function()
-        if MainFrame then
-            MainFrame.Visible = not MainFrame.Visible
-        end
-    end)
 end
-
--- ========== ИНИЦИАЛИЗАЦИЯ ==========
-if getgenv().FlickLoaded then
-    if getgenv().RestoreGUI then
-        getgenv().RestoreGUI()
-    end
-else
-    getgenv().FlickLoaded = true
-    getgenv().FlickToMurderer = flickToMurderer
-    getgenv().RestoreGUI = createGUI
-    
-    setupKeybind()
-    createGUI()
-    
-    saveConfig()
-    
-    notify("⚡ FLICK TO MURDERER v3 LOADED ⚡\nInstant mode: " .. (Config.InstantFlick and "ON" or "OFF") .. " | Bind: " .. Config.Keybind, 3)
-end
-
-print("Flick To Murderer v3 loaded - MAXIMUM SPEED! Instant flick available.")
