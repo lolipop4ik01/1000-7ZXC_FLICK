@@ -4,6 +4,7 @@
     + Aim Predict (Ping Comp + Velocity Smoothing)
     + Текстовый ввод для слайдеров
     + Отключение уведомлений
+    + Автоматический возврат камеры (без ЛКМ)
 ]]
 
 -- ========== СЕРВИСЫ ==========
@@ -25,14 +26,13 @@ local Config = {
     Keybind = "F",
     AutoShoot = false,
     InstantFlick = true,
-    ReturnCamera = false,
+    ReturnCamera = true,
     ReturnSpeed = 120,
     ReturnRandomnessX = 25,
     ReturnRandomnessY = 25,
-    ReturnDelay = 2,
+    ReturnDelay = 100, -- ms
     NotificationsEnabled = true,
     
-    -- НАСТРОЙКИ ПРЕДИКТА
     PredictEnabled = false,
     PredictOp = "Multiply",
     PredictXZ = 0.091,
@@ -112,7 +112,7 @@ local function notify(msg, duration)
     end)
 end
 
--- ========== СИСТЕМА ПРЕДИКТА ==========
+-- ========== ПРЕДИКТ ==========
 local function getPing()
     local success, ping = pcall(function()
         return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
@@ -162,14 +162,13 @@ local function getPredictedPosition(part)
     
     if Config.PingComp then
         local ping = getPing()
-        local pingOffset = vel * (ping * 0.5)
-        offset = offset + pingOffset
+        offset = offset + vel * (ping * 0.5)
     end
     
     return part.Position + offset
 end
 
--- ========== GUI СИСТЕМА С ДРЭГОМ ==========
+-- ========== GUI ДРЭГ ==========
 local DragSystem = {}
 function DragSystem.MakeDraggable(gui, dragArea, onPositionChanged)
     local dragging, dragStart, startPos = false, nil, nil
@@ -194,7 +193,7 @@ end
 
 -- ========== ЛОГИКА FLICK ==========
 local lastCameraCFrame = nil
-local waitingForLMB = false
+local returnToken = 0
 
 local function findMurderer()
     if game.PlaceId == 142823291 then
@@ -253,11 +252,12 @@ local function autoShoot(murderer)
         pcall(function() remote:FireServer({ workspace.CurrentCamera.CFrame, CFrame.new(targetPos) }) end)
     end
     
-    -- 2. Фоллбек: обычный выстрел через Tool:Activate()
+    -- 2. Фоллбек: обычный выстрел
     local char = LocalPlayer.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
-        local gun = char:FindFirstChild("Gun") or (LocalPlayer:FindFirstChild("Backpack") and LocalPlayer.Backpack:FindFirstChild("Gun"))
+        local backpack = LocalPlayer:FindFirstChild("Backpack")
+        local gun = char:FindFirstChild("Gun") or (backpack and backpack:FindFirstChild("Gun"))
         
         if gun and gun:IsA("Tool") and hum then
             if gun.Parent ~= char then
@@ -274,8 +274,10 @@ local function autoShoot(murderer)
     end
 end
 
-local function returnCameraWithRandomness()
+local function returnCameraWithRandomness(token)
+    if token and token ~= returnToken then return end
     if not Config.ReturnCamera or not lastCameraCFrame then return end
+    
     local cam = workspace.CurrentCamera
     local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
     local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
@@ -285,7 +287,9 @@ local function returnCameraWithRandomness()
     local angleDist = math.acos(math.clamp(oldCFrame.LookVector:Dot(targetCFrame.LookVector), -1, 1))
     local totalTime = math.clamp(angleDist / (Config.ReturnSpeed * 2), 0.01, 0.35)
     local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
+    
     for i = 1, steps do
+        if token and token ~= returnToken then return end
         cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps)
         task.wait(totalTime / steps)
     end
@@ -304,11 +308,10 @@ function flickToMurderer()
     
     if Config.ReturnCamera then lastCameraCFrame = cam.CFrame end
     
-    -- Строго в центр (HumanoidRootPart)
+    -- Строго центр тела (HumanoidRootPart)
     local targetPart = murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then notify("Target HRP not found!", 1) return end
     local targetPos = getPredictedPosition(targetPart)
-    
     if not targetPos then notify("Cannot get target position!", 1) return end
     
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
@@ -336,10 +339,19 @@ function flickToMurderer()
     end
     
     autoShoot(murderer)
-    if Config.ReturnCamera then waitingForLMB = true end
+    
+    -- АВТОВОЗВРАТ КАМЕРЫ
+    if Config.ReturnCamera then
+        returnToken = returnToken + 1
+        local myToken = returnToken
+        task.spawn(function()
+            task.wait(Config.ReturnDelay / 1000)
+            returnCameraWithRandomness(myToken)
+        end)
+    end
 end
 
--- ========== KEYBIND & LMB ==========
+-- ========== KEYBIND ==========
 local waitingForBind = false
 local function setupKeybind()
     if getgenv().KeybindConnection then pcall(function() getgenv().KeybindConnection:Disconnect() end) end
@@ -357,16 +369,6 @@ local function setupKeybind()
         if input.KeyCode == Enum.KeyCode[Config.Keybind] then flickToMurderer() end
     end)
 end
-
-if getgenv().LMBConnection then pcall(function() getgenv().LMBConnection:Disconnect() end) end
-getgenv().LMBConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.UserInputType == Enum.UserInputType.MouseButton1 and waitingForLMB and Config.ReturnCamera then
-        waitingForLMB = false
-        task.wait(Config.ReturnDelay / 1000)
-        returnCameraWithRandomness()
-    end
-end)
 
 -- ========== ГЛАВНОЕ GUI ==========
 local MainGui, MainFrame, CircleButton = nil, nil, nil
@@ -391,8 +393,7 @@ local function createMainGUI()
     local Title = Instance.new("TextLabel", MainFrame)
     Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5); Title.BackgroundTransparency = 1
     Title.Text = "⚡ FLICK TO MURDERER"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18
-    Title.Active = true -- Обязательно для перетаскивания
-    
+    Title.Active = true
     DragSystem.MakeDraggable(MainFrame, Title, function(pos) end)
     
     local Container = Instance.new("ScrollingFrame", MainFrame)
@@ -429,7 +430,6 @@ local function createMainGUI()
         label.Text = text; label.TextColor3 = Color3.new(1, 1, 1); label.Font = Enum.Font.Jura; label.TextSize = 12
         label.TextXAlignment = Enum.TextXAlignment.Left
         
-        -- ПОЛЕ ВВОДА
         local textBox = Instance.new("TextBox", frame)
         textBox.Size = UDim2.new(0, 50, 0, 22); textBox.Position = UDim2.new(1, -50, 0, 0)
         textBox.BackgroundColor3 = Color3.fromRGB(30, 30, 35); textBox.TextColor3 = Color3.new(1, 1, 1)
@@ -448,8 +448,7 @@ local function createMainGUI()
         
         local dragging = false
         local function updateVisuals(val)
-            local pos = (val - minVal) / (maxVal - minVal)
-            fill.Size = UDim2.new(pos, 0, 1, 0)
+            fill.Size = UDim2.new((val - minVal) / (maxVal - minVal), 0, 1, 0)
             label.Text = text .. ": " .. formatVal(val)
             textBox.Text = tostring(formatVal(val))
         end
@@ -461,9 +460,7 @@ local function createMainGUI()
         end
         
         sliderBg.InputBegan:Connect(function(input) 
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then 
-                dragging = true; updateFromInput(input) 
-            end 
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; updateFromInput(input) end 
         end)
         UserInputService.InputChanged:Connect(function(input) 
             if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then updateFromInput(input) end 
@@ -499,7 +496,6 @@ local function createMainGUI()
         section.Font = Enum.Font.Jura; section.TextSize = 12
     end
     
-    -- UI ЭЛЕМЕНТЫ
     addSection("ОСНОВНЫЕ")
     addToggle("🔘 FLICK", function() return Config.Enabled end, function(v) Config.Enabled = v end)
     addToggle("⚡ INSTANT FLICK", function() return Config.InstantFlick end, function(v) Config.InstantFlick = v end)
@@ -522,11 +518,11 @@ local function createMainGUI()
     addSlider("↕️ PREDICT Y", 0.001, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
     
     addSection("ВОЗВРАТ КАМЕРЫ")
-    addToggle("🔄 RETURN CAMERA", function() return Config.ReturnCamera end, function(v) Config.ReturnCamera = v end)
+    addToggle("🔄 AUTO RETURN CAMERA", function() return Config.ReturnCamera end, function(v) Config.ReturnCamera = v end)
     addSlider("🎯 RETURN SPEED", 1, 200, function() return Config.ReturnSpeed end, function(v) Config.ReturnSpeed = v end)
+    addSlider("⏱️ RETURN DELAY (MS)", 0, 2000, function() return Config.ReturnDelay end, function(v) Config.ReturnDelay = v end)
     addSlider("🎲 RANDOM X %", 0, 100, function() return Config.ReturnRandomnessX end, function(v) Config.ReturnRandomnessX = v end)
     addSlider("🎲 RANDOM Y %", 0, 100, function() return Config.ReturnRandomnessY end, function(v) Config.ReturnRandomnessY = v end)
-    addSlider("⏱️ DELAY MS", 0, 50, function() return Config.ReturnDelay end, function(v) Config.ReturnDelay = v end)
     
     addSection("НАСТРОЙКИ")
     addToggle("🔔 УВЕДОМЛЕНИЯ", function() return Config.NotificationsEnabled end, function(v) Config.NotificationsEnabled = v end)
@@ -565,5 +561,5 @@ getgenv().flickToMurderer = flickToMurderer
 setupKeybind()
 createMainGUI()
 
-notify("⚡ FLICK TO MURDERER LOADED ⚡\nAim Predict Ready", 3)
-print("Flick To Murderer loaded - Autonomous version with Aim Predict")
+notify("⚡ FLICK TO MURDERER LOADED ⚡\nAuto-return ready", 3)
+print("Flick To Murderer loaded - Autonomous version with Aim Predict & Auto-return")
