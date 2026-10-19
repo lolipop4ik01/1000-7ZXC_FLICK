@@ -4,7 +4,9 @@
     + Aim Predict (Ping Comp + Velocity Smoothing)
     + Текстовый ввод для слайдеров
     + Отключение уведомлений
-    + Автоматический возврат камеры (без ЛКМ)
+    + Автоматический возврат камеры
+    + Выбор парта цели (по умолчанию HRP - центр)
+    + Визуализация предикта
 ]]
 
 -- ========== СЕРВИСЫ ==========
@@ -16,6 +18,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
 local Stats = game:GetService("Stats")
+local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -30,8 +33,11 @@ local Config = {
     ReturnSpeed = 120,
     ReturnRandomnessX = 25,
     ReturnRandomnessY = 25,
-    ReturnDelay = 100, -- ms
+    ReturnDelay = 100,
     NotificationsEnabled = true,
+    
+    TargetPart = "HumanoidRootPart",
+    ShowPredictVisual = false,
     
     PredictEnabled = false,
     PredictOp = "Multiply",
@@ -41,30 +47,24 @@ local Config = {
     VelocitySmooth = true,
 }
 
--- ========== СИСТЕМА СОХРАНЕНИЯ ==========
+-- ========== СОХРАНЕНИЕ ==========
 local CONFIG_FILE = "flick_config_standalone.json"
-
 local function saveConfig()
     pcall(function()
-        if writefile then
-            writefile(CONFIG_FILE, HttpService:JSONEncode(Config))
-        end
+        if writefile then writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end
     end)
 end
-
 local function loadConfig()
     pcall(function()
         if readfile and isfile and isfile(CONFIG_FILE) then
             local data = HttpService:JSONDecode(readfile(CONFIG_FILE))
-            for k, v in pairs(data) do
-                Config[k] = v
-            end
+            for k, v in pairs(data) do Config[k] = v end
         end
     end)
 end
 loadConfig()
 
--- ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+-- ========== ВСПОМОГАТЕЛЬНЫЕ ==========
 local function getSafeParent()
     local parent = gethui and gethui()
     if parent and typeof(parent) == "Instance" then return parent end
@@ -85,7 +85,6 @@ local function notify(msg, duration)
             sg.IgnoreGuiInset = true
             sg.Parent = getSafeParent()
         end
-        
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(0, 250, 0, 40)
         frame.Position = UDim2.new(0.5, -125, 0.8, 0)
@@ -93,7 +92,6 @@ local function notify(msg, duration)
         frame.BackgroundTransparency = 0.2
         frame.BorderSizePixel = 0
         frame.Parent = sg
-        
         local label = Instance.new("TextLabel")
         label.Size = UDim2.new(1, 0, 1, 0)
         label.BackgroundTransparency = 1
@@ -102,7 +100,6 @@ local function notify(msg, duration)
         label.Font = Enum.Font.Jura
         label.TextSize = 14
         label.Parent = frame
-        
         Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
         frame:TweenPosition(UDim2.new(0.5, -125, 0.75, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.3, true)
         task.wait(duration)
@@ -121,25 +118,17 @@ local function getPing()
 end
 
 local velocityCache = {}
-
 local function getSmoothedVelocity(part)
     if not Config.VelocitySmooth then return part.AssemblyLinearVelocity end
-    
     local now = tick()
     local key = tostring(part)
-    
     if not velocityCache[key] then velocityCache[key] = {} end
     local cache = velocityCache[key]
     table.insert(cache, {v = part.AssemblyLinearVelocity, t = now})
-    
-    while #cache > 0 and now - cache[1].t > 0.1 do
-        table.remove(cache, 1)
-    end
-    
+    while #cache > 0 and now - cache[1].t > 0.1 do table.remove(cache, 1) end
     local avg = Vector3.zero
     for _, entry in ipairs(cache) do avg = avg + entry.v end
     if #cache > 0 then avg = avg / #cache end
-    
     return avg
 end
 
@@ -153,6 +142,11 @@ local function getPredictedPosition(part)
     local multXZ = Config.PredictXZ
     local multY = Config.PredictY
     
+    -- Для HRP отключаем вертикальный предикт, чтобы держать идеальный центр
+    if part.Name == "HumanoidRootPart" then
+        multY = 0
+    end
+    
     if Config.PredictOp == "Divide" then
         if multXZ > 0 then multXZ = 1 / multXZ else multXZ = 0 end
         if multY > 0 then multY = 1 / multY else multY = 0 end
@@ -162,10 +156,95 @@ local function getPredictedPosition(part)
     
     if Config.PingComp then
         local ping = getPing()
-        offset = offset + vel * (ping * 0.5)
+        local pingOffset = vel * (ping * 0.5)
+        if part.Name == "HumanoidRootPart" then
+            pingOffset = Vector3.new(pingOffset.X, 0, pingOffset.Z)
+        end
+        offset = offset + pingOffset
     end
     
     return part.Position + offset
+end
+
+-- ========== ВИЗУАЛ ПРЕДИКТА ==========
+local visualPart = nil
+local visualBeam = nil
+local visualAttach0 = nil
+local visualAttach1 = nil
+
+local function createVisualizer()
+    if visualPart and visualPart.Parent then return end
+    visualPart = Instance.new("Part")
+    visualPart.Name = "FlickPredictVisual"
+    visualPart.Size = Vector3.new(0.6, 0.6, 0.6)
+    visualPart.Shape = Enum.PartType.Ball
+    visualPart.Material = Enum.Material.Neon
+    visualPart.Color = Color3.fromRGB(255, 50, 50)
+    visualPart.Anchored = true
+    visualPart.CanCollide = false
+    visualPart.CanQuery = false
+    visualPart.CanTouch = false
+    visualPart.Transparency = 0.3
+    visualPart.Parent = Workspace
+    
+    visualAttach0 = Instance.new("Attachment")
+    visualAttach0.Name = "FlickVisualAttach0"
+    visualAttach1 = Instance.new("Attachment")
+    visualAttach1.Name = "FlickVisualAttach1"
+    visualAttach1.Parent = visualPart
+    
+    visualBeam = Instance.new("Beam")
+    visualBeam.Name = "FlickPredictBeam"
+    visualBeam.Attachment0 = visualAttach0
+    visualBeam.Attachment1 = visualAttach1
+    visualBeam.Width0 = 0.15
+    visualBeam.Width1 = 0.15
+    visualBeam.FaceCamera = true
+    visualBeam.Color = ColorSequence.new(Color3.fromRGB(255, 50, 50))
+    visualBeam.Transparency = NumberSequence.new(0.5)
+    visualBeam.Parent = visualPart
+end
+
+local function updateVisualizer()
+    if not Config.ShowPredictVisual then
+        if visualPart then visualPart.Transparency = 1 end
+        if visualBeam then visualBeam.Enabled = false end
+        return
+    end
+    
+    local murderer = findMurderer()
+    if not murderer or not murderer.Character then
+        if visualPart then visualPart.Transparency = 1 end
+        if visualBeam then visualBeam.Enabled = false end
+        return
+    end
+    
+    local targetPart = murderer.Character:FindFirstChild(Config.TargetPart)
+    if not targetPart then
+        targetPart = murderer.Character:FindFirstChild("HumanoidRootPart")
+    end
+    if not targetPart then
+        if visualPart then visualPart.Transparency = 1 end
+        if visualBeam then visualBeam.Enabled = false end
+        return
+    end
+    
+    createVisualizer()
+    
+    local predPos = getPredictedPosition(targetPart)
+    visualPart.Position = predPos
+    visualPart.Transparency = 0.3
+    visualBeam.Enabled = true
+    
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        visualAttach0.Parent = hrp
+        visualAttach0.Position = Vector3.new(0, 1, 0)
+    else
+        visualAttach0.Parent = visualPart
+        visualAttach0.Position = Vector3.zero
+    end
 end
 
 -- ========== GUI ДРЭГ ==========
@@ -195,7 +274,7 @@ end
 local lastCameraCFrame = nil
 local returnToken = 0
 
-local function findMurderer()
+function findMurderer()
     if game.PlaceId == 142823291 then
         local success, roleData = pcall(function()
             local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
@@ -240,25 +319,21 @@ end
 local function autoShoot(murderer)
     if not Config.AutoShoot then return end
     if not murderer or not murderer.Character then return end
-    
-    local targetPart = murderer.Character:FindFirstChild("HumanoidRootPart")
+    local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then return end
     local targetPos = getPredictedPosition(targetPart)
     if not targetPos then return end
     
-    -- 1. Кастомный ремоут
     local remote = findShootRemote()
     if remote then
         pcall(function() remote:FireServer({ workspace.CurrentCamera.CFrame, CFrame.new(targetPos) }) end)
     end
     
-    -- 2. Фоллбек: обычный выстрел
     local char = LocalPlayer.Character
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
         local backpack = LocalPlayer:FindFirstChild("Backpack")
         local gun = char:FindFirstChild("Gun") or (backpack and backpack:FindFirstChild("Gun"))
-        
         if gun and gun:IsA("Tool") and hum then
             if gun.Parent ~= char then
                 pcall(function() hum:EquipTool(gun) end)
@@ -277,7 +352,6 @@ end
 local function returnCameraWithRandomness(token)
     if token and token ~= returnToken then return end
     if not Config.ReturnCamera or not lastCameraCFrame then return end
-    
     local cam = workspace.CurrentCamera
     local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
     local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
@@ -287,7 +361,6 @@ local function returnCameraWithRandomness(token)
     local angleDist = math.acos(math.clamp(oldCFrame.LookVector:Dot(targetCFrame.LookVector), -1, 1))
     local totalTime = math.clamp(angleDist / (Config.ReturnSpeed * 2), 0.01, 0.35)
     local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
-    
     for i = 1, steps do
         if token and token ~= returnToken then return end
         cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps)
@@ -308,39 +381,48 @@ function flickToMurderer()
     
     if Config.ReturnCamera then lastCameraCFrame = cam.CFrame end
     
-    -- Строго центр тела (HumanoidRootPart)
-    local targetPart = murderer.Character:FindFirstChild("HumanoidRootPart")
-    if not targetPart then notify("Target HRP not found!", 1) return end
+    local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
+    if not targetPart then notify("Target part not found!", 1) return end
     local targetPos = getPredictedPosition(targetPart)
     if not targetPos then notify("Cannot get target position!", 1) return end
+    
+    -- Поворачиваем тело в сторону цели (идеальный центр)
+    local flatTarget = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
+    local dir = (flatTarget - rootPart.Position)
+    if dir.Magnitude < 0.01 then return end
+    local newHRPCFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + dir.Unit)
     
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
     local isFirstPerson = (cam.CFrame.Position - headPos).Magnitude < 5
     
-    local newCFrame
+    local newCamCFrame
     if isFirstPerson then
-        newCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
+        newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
     else
         local distance = (cam.CFrame.Position - rootPart.Position).Magnitude
-        newCFrame = CFrame.lookAt(rootPart.Position + (targetPos - rootPart.Position).Unit * distance, targetPos)
+        newCamCFrame = CFrame.lookAt(rootPart.Position + (targetPos - rootPart.Position).Unit * distance, targetPos)
     end
     
     if Config.InstantFlick then
-        cam.CFrame = newCFrame
+        rootPart.CFrame = newHRPCFrame
+        cam.CFrame = newCamCFrame
     else
         local oldCFrame = cam.CFrame
+        local oldHRP = rootPart.CFrame
         local angleDist = math.acos(math.clamp(oldCFrame.LookVector:Dot((targetPos - oldCFrame.Position).Unit), -1, 1))
         local totalTime = math.clamp(angleDist / (Config.FlickSpeed * 2), 0.01, 0.35)
         local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
         for i = 1, steps do
-            cam.CFrame = oldCFrame:Lerp(newCFrame, i / steps)
+            if not rootPart.Parent then break end
+            local alpha = i / steps
+            rootPart.CFrame = oldHRP:Lerp(newHRPCFrame, alpha)
+            cam.CFrame = oldCFrame:Lerp(newCamCFrame, alpha)
             task.wait(totalTime / steps)
         end
     end
     
     autoShoot(murderer)
     
-    -- АВТОВОЗВРАТ КАМЕРЫ
     if Config.ReturnCamera then
         returnToken = returnToken + 1
         local myToken = returnToken
@@ -370,6 +452,11 @@ local function setupKeybind()
     end)
 end
 
+-- ========== ВИЗУАЛ ЛУП ==========
+RunService.RenderStepped:Connect(function()
+    pcall(updateVisualizer)
+end)
+
 -- ========== ГЛАВНОЕ GUI ==========
 local MainGui, MainFrame, CircleButton = nil, nil, nil
 
@@ -386,7 +473,7 @@ local function createMainGUI()
     DragSystem.MakeDraggable(CircleButton, CircleButton, function(pos) end)
     
     MainFrame = Instance.new("Frame")
-    MainFrame.Size = UDim2.new(0, 300, 0, 650); MainFrame.Position = UDim2.new(0.5, -150, 0.2, 0)
+    MainFrame.Size = UDim2.new(0, 300, 0, 700); MainFrame.Position = UDim2.new(0.5, -150, 0.15, 0)
     MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25); MainFrame.BorderSizePixel = 0; MainFrame.Visible = false; MainFrame.Parent = MainGui
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
     
@@ -417,6 +504,43 @@ local function createMainGUI()
             setValue(newValue); btn.Text = text .. ": " .. (newValue and "ON" or "OFF")
             btn.BackgroundColor3 = newValue and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
             saveConfig(); notify(text .. " " .. (newValue and "ON" or "OFF"), 1)
+        end)
+    end
+    
+    local function addDropdown(text, options, getValue, setValue)
+        local btn = Instance.new("TextButton", Container)
+        btn.Size = UDim2.new(1, 0, 0, 40); btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+        btn.TextColor3 = Color3.new(1, 1, 1); btn.Font = Enum.Font.Jura; btn.TextSize = 14
+        btn.Text = text .. ": " .. getValue()
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        
+        local frame = Instance.new("Frame", Container)
+        frame.Size = UDim2.new(1, 0, 0, 0); frame.BackgroundTransparency = 1; frame.ClipsDescendants = true
+        local list = Instance.new("UIListLayout", frame)
+        list.Padding = UDim.new(0, 2)
+        
+        local expanded = false
+        for _, opt in ipairs(options) do
+            local optBtn = Instance.new("TextButton", frame)
+            optBtn.Size = UDim2.new(1, 0, 0, 30); optBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+            optBtn.TextColor3 = Color3.new(1, 1, 1); optBtn.Font = Enum.Font.Jura; optBtn.TextSize = 12; optBtn.Text = opt
+            Instance.new("UICorner", optBtn).CornerRadius = UDim.new(0, 4)
+            optBtn.MouseButton1Click:Connect(function()
+                setValue(opt)
+                btn.Text = text .. ": " .. opt
+                frame.Size = UDim2.new(1, 0, 0, 0)
+                expanded = false
+                saveConfig()
+            end)
+        end
+        
+        btn.MouseButton1Click:Connect(function()
+            expanded = not expanded
+            if expanded then
+                frame.Size = UDim2.new(1, 0, 0, #options * 32)
+            else
+                frame.Size = UDim2.new(1, 0, 0, 0)
+            end
         end)
     end
     
@@ -496,13 +620,17 @@ local function createMainGUI()
         section.Font = Enum.Font.Jura; section.TextSize = 12
     end
     
+    local bodyParts = {"HumanoidRootPart", "Head", "UpperTorso", "LowerTorso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"}
+    
     addSection("ОСНОВНЫЕ")
     addToggle("🔘 FLICK", function() return Config.Enabled end, function(v) Config.Enabled = v end)
     addToggle("⚡ INSTANT FLICK", function() return Config.InstantFlick end, function(v) Config.InstantFlick = v end)
     addSlider("🎚️ FLICK SPEED", 1, 200, function() return Config.FlickSpeed end, function(v) Config.FlickSpeed = v end)
     
     addSection("ЦЕЛЬ")
+    addDropdown("TARGET PART", bodyParts, function() return Config.TargetPart end, function(v) Config.TargetPart = v end)
     addToggle("🔫 AUTO SHOOT", function() return Config.AutoShoot end, function(v) Config.AutoShoot = v end)
+    addToggle("👁️ SHOW PREDICT VISUAL", function() return Config.ShowPredictVisual end, function(v) Config.ShowPredictVisual = v end)
 
     addSection("AIM PREDICT")
     addToggle("🎯 AIM PREDICT", function() return Config.PredictEnabled end, function(v) Config.PredictEnabled = v end)
@@ -541,7 +669,8 @@ local function createMainGUI()
     addButton("👁️ HIDE GUI", function() MainFrame.Visible = false; notify("GUI hidden", 2) end)
     addButton("💀 DESTROY ALL", function()
         pcall(function() MainGui:Destroy() end)
-        MainGui, MainFrame, CircleButton = nil, nil, nil
+        pcall(function() if visualPart then visualPart:Destroy() end end)
+        MainGui, MainFrame, CircleButton, visualPart, visualBeam = nil, nil, nil, nil, nil
         notify("All GUI destroyed", 2)
     end)
     
@@ -552,6 +681,7 @@ end
 if getgenv().FlickLoaded then
     pcall(function() 
         if MainGui then MainGui:Destroy() end
+        if visualPart then visualPart:Destroy() end
     end)
 end
 
