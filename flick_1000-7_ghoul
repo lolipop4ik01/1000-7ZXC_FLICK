@@ -1,44 +1,44 @@
 --[[
     ╔══════════════════════════════════════════════════════════════╗
     ║  Flick To Murderer — MM2 (PlaceId 142823291)                 ║
-    ║  SCRIPT VERSION: 4.0.0                                       ║
-    ║  CONFIG VERSION: 4                                           ║
+    ║  SCRIPT VERSION: 5.0.0                                       ║
+    ║  CONFIG VERSION: 5                                           ║
     ║  Часть 1 / 2 — Ядро                                          ║
     ║                                                              ║
-    ║  ИСПРАВЛЕНИЯ v4:                                             ║
-    ║   [1] disconnectAll не затирает ЧУЖОЙ токен                  ║
-    ║   [2] Хук: newcclosure-обёртка + checkcaller                 ║
-    ║   [3] firing не залипает: pcall-finally + порядок проверок   ║
-    ║   [4] Бинд через task.spawn(flick) — не блокирует UI         ║
-    ║   [5] Роль: поддерживаем string/Instance-ключи, Role=="1"    ║
-    ║   [6] velCache чистится раз в 10 сек                         ║
-    ║   [7] DebugHook = false по умолчанию                         ║
-    ║   [8] disconnectAll сносит FlickNotifyV4                     ║
-    ║   [9] visualBodyFlick ВЫЗЫВАЕТСЯ ДО fireShoot                ║
+    ║  ИСПРАВЛЕНИЯ v5 (по F9-логам):                               ║
+    ║   [1] waitingForBind проверяется ДО processed                ║
+    ║   [2] safeParent = PlayerGui (gethui полностью убран)        ║
+    ║   [3] Хук через getrawmetatable + setreadonly + __namecall   ║
+    ║   [4] Player resolve: string / number(UserId) / Instance     ║
+    ║   [5] EquipTimeout = 1.5 по умолчанию                        ║
+    ║   [6] Debug Shot — в Части 2 (экспорт уже готов)             ║
     ║                                                              ║
-    ║  СЕКЦИИ:                                                     ║
-    ║   V4-SERVICES · V4-CONFIG  · V4-LIFECYCLE                    ║
-    ║   V4-HELPERS  · V4-PREDICT · V4-CACHE                        ║
-    ║   V4-GUN      · V4-REMOTE  · V4-HOOK                         ║
-    ║   V4-WALL     · V4-FLICK   · V4-KEYBIND · V4-EXPORT          ║
+    ║  СОХРАНЕНО ИЗ v4:                                            ║
+    ║   • disconnectAll не затирает ЧУЖОЙ токен                    ║
+    ║   • firing не залипает: pcall-finally + порядок проверок     ║
+    ║   • бинд через task.spawn(flick)                             ║
+    ║   • velCache чистится раз в 10 сек                           ║
+    ║   • DebugHook = false по умолчанию                           ║
+    ║   • disconnectAll сносит FlickNotifyV5                       ║
+    ║   • visualBodyFlick ДО fireShoot                             ║
     ╚══════════════════════════════════════════════════════════════╝
 ]]
 
--- ===================== V4-SERVICES =====================
+-- ===================== V5-SERVICES =====================
 local Players     = game:GetService("Players")
 local UIS         = game:GetService("UserInputService")
 local RS          = game:GetService("ReplicatedStorage")
 local Stats       = game:GetService("Stats")
-local CoreGui     = game:GetService("CoreGui")
 local RunService  = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 
-local LP = Players.LocalPlayer
+local LP         = Players.LocalPlayer
+local PLAYER_GUI = LP:WaitForChild("PlayerGui")
 
--- ===================== V4-CONFIG =====================
-local CONFIG_VERSION = 4
-local SCRIPT_VERSION = "4.0.0"
-local CONFIG_FILE    = "flick_mm2_config_v4.json"
+-- ===================== V5-CONFIG =====================
+local CONFIG_VERSION = 5
+local SCRIPT_VERSION = "5.0.0"
+local CONFIG_FILE    = "flick_mm2_config_v5.json"
 
 local Config = {
     ConfigVersion  = CONFIG_VERSION,
@@ -62,10 +62,10 @@ local Config = {
     CacheInterval  = 1.0,
     FlickCooldown  = 0.15,
     WallCheck      = true,
-    EquipTimeout   = 0.3,
+    EquipTimeout   = 1.5,     -- [5] было 0.3 — мало
 
     Notifications  = true,
-    DebugHook      = false,   -- [7] по умолчанию ВЫКЛ
+    DebugHook      = false,
 }
 
 local function saveConfig()
@@ -87,14 +87,14 @@ local function loadConfig()
             end
             Config.ConfigVersion = CONFIG_VERSION
             Config.ScriptVersion = SCRIPT_VERSION
-            -- [7] форсим выкл, если конфиг пришёл из v3
-            Config.DebugHook = false
+            Config.DebugHook     = false
+            Config.EquipTimeout  = 1.5   -- форсим
         end
     end)
 end
 loadConfig()
 
--- ===================== V4-LIFECYCLE =====================
+-- ===================== V5-LIFECYCLE =====================
 local INSTANCE_TOKEN = string.format(
     "%d_%d_%d",
     math.floor(os.clock() * 1e6),
@@ -110,54 +110,44 @@ local function track(conn)
 end
 
 local function isCurrentInstance()
-    return getgenv()._flickV4Token == INSTANCE_TOKEN
+    return getgenv()._flickV5Token == INSTANCE_TOKEN
 end
 
--- [1] Токен сбрасываем ТОЛЬКО если наш
--- [8] Заодно сносим нотификационный ScreenGui
 local function disconnectAll()
-    if getgenv()._flickV4Token == INSTANCE_TOKEN then
-        getgenv()._flickV4Token = nil
+    if getgenv()._flickV5Token == INSTANCE_TOKEN then
+        getgenv()._flickV5Token = nil
     end
     for _, c in ipairs(activeConnections) do
         pcall(function() c:Disconnect() end)
     end
     activeConnections = {}
     pcall(function()
-        local parent = (gethui and gethui()) or CoreGui or LP:FindFirstChild("PlayerGui")
-        if parent then
-            local sg = parent:FindFirstChild("FlickNotifyV4")
-            if sg then sg:Destroy() end
-        end
+        local sg = PLAYER_GUI:FindFirstChild("FlickNotifyV5")
+        if sg then sg:Destroy() end
     end)
 end
 
--- Старый инстанс прибираем до установки нового токена
-if type(getgenv()._flickV4Disconnect) == "function" then
-    pcall(getgenv()._flickV4Disconnect)
+if type(getgenv()._flickV5Disconnect) == "function" then
+    pcall(getgenv()._flickV5Disconnect)
 end
--- теперь ставим свой токен
-getgenv()._flickV4Token = INSTANCE_TOKEN
+getgenv()._flickV5Token = INSTANCE_TOKEN
 
--- ===================== V4-HELPERS =====================
+-- ===================== V5-HELPERS =====================
+-- [2] Никакого gethui / CoreGui — только PlayerGui
 local function safeParent()
-    local p = gethui and gethui()
-    if p and typeof(p) == "Instance" then return p end
-    if CoreGui and typeof(CoreGui) == "Instance" then return CoreGui end
-    return LP:WaitForChild("PlayerGui")
+    return PLAYER_GUI
 end
 
 local function notify(text, dur)
     if not Config.Notifications then return end
     pcall(function()
-        local parent = safeParent()
-        local sg = parent:FindFirstChild("FlickNotifyV4")
+        local sg = PLAYER_GUI:FindFirstChild("FlickNotifyV5")
         if not sg then
             sg = Instance.new("ScreenGui")
-            sg.Name = "FlickNotifyV4"
+            sg.Name = "FlickNotifyV5"
             sg.ResetOnSpawn = false
             sg.IgnoreGuiInset = true
-            sg.Parent = parent
+            sg.Parent = PLAYER_GUI
         end
         local f = Instance.new("Frame")
         f.Size = UDim2.new(0, 280, 0, 34)
@@ -180,7 +170,7 @@ local function notify(text, dur)
     end)
 end
 
--- ===================== V4-PREDICT =====================
+-- ===================== V5-PREDICT =====================
 local function getPingSeconds()
     local ok, v = pcall(function()
         return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
@@ -203,7 +193,7 @@ local function smoothedVelocity(part)
     return #c > 0 and (sum / #c) or Vector3.zero
 end
 
--- [6] Чистка velCache от ушедших партов
+-- Чистка velCache от мёртвых партов
 task.spawn(function()
     while isCurrentInstance() do
         task.wait(10)
@@ -235,43 +225,67 @@ local function predictedPosition(part)
     return part.Position + offset
 end
 
--- ===================== V4-CACHE =====================
+-- ===================== V5-CACHE =====================
 local murdererCache = nil
 local cacheTicks    = 0
 
--- [5] Парсинг роли: поддерживаем строковые и Instance-ключи, Role=="1" или "Murderer"
+-- [4] Универсальный resolve ключа: string / number(UserId) / Instance
+local function resolvePlayerByKey(key)
+    if type(key) == "string" then
+        return Players:FindFirstChild(key)
+    end
+    if type(key) == "number" then
+        return Players:GetPlayerByUserId(key)
+    end
+    if typeof(key) == "Instance" then
+        if key:IsA("Player") then return key end
+        -- на случай, если пришёл Character
+        if key:IsA("Model") then
+            return Players:GetPlayerFromCharacter(key)
+        end
+    end
+    return nil
+end
+
+local function isMurdererRole(role)
+    if role == nil then return false end
+    local s = tostring(role):lower()
+    return s == "murderer" or s == "1"
+end
+
+-- data: [playerRef] = {Role=..., Killed=..., Dead=..., ...}
+-- где playerRef может быть userId, именем или Player
 local function parseMurdererFromData(data)
     if type(data) ~= "table" then return nil end
 
-    -- вариант A: ключ — имя, значение — info.Role
     for key, info in pairs(data) do
+        local role, killed, dead = nil, false, false
+
         if type(info) == "table" then
-            local role = info.Role
-            local roleStr = tostring(role or ""):lower()
-            local isMurderer = (roleStr == "murderer") or (roleStr == "1")
-            local killed = info.Killed or false
-            local dead   = info.Dead or false
+            role   = info.Role or info.role or info.RoleId or info.roleId
+            killed = info.Killed or info.killed or false
+            dead   = info.Dead   or info.dead   or false
+        elseif type(info) == "string" or type(info) == "number" then
+            role = info   -- вариант: data[userId] = "Murderer"
+        end
 
-            if isMurderer and not killed and not dead then
-                local playerObj = nil
-                if typeof(key) == "Instance" and key:IsA("Player") then
-                    playerObj = key
-                elseif type(key) == "string" then
-                    playerObj = Players:FindFirstChild(key)
-                end
+        if isMurdererRole(role) and not killed and not dead then
+            local playerObj = resolvePlayerByKey(key)
 
-                -- fallback: если в info есть Player-ссылка
-                if not playerObj and typeof(info.Player) == "Instance" then
+            -- фоллбеки внутри info
+            if not playerObj and type(info) == "table" then
+                if typeof(info.Player) == "Instance" and info.Player:IsA("Player") then
                     playerObj = info.Player
+                elseif type(info.UserId) == "number" then
+                    playerObj = Players:GetPlayerByUserId(info.UserId)
+                elseif type(info.userId) == "number" then
+                    playerObj = Players:GetPlayerByUserId(info.userId)
                 end
-                if not playerObj and typeof(info.player) == "Instance" then
-                    playerObj = info.player
-                end
+            end
 
-                if playerObj and playerObj.Character
-                    and playerObj.Character:FindFirstChild("HumanoidRootPart") then
-                    return playerObj
-                end
+            if playerObj and playerObj.Character
+                and playerObj.Character:FindFirstChild("HumanoidRootPart") then
+                return playerObj
             end
         end
     end
@@ -292,7 +306,7 @@ local function findMurdererOnce()
         end
         return nil
     end
-    -- fallback: knife в character/backpack
+    -- fallback: нож в character/backpack
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LP and p.Character then
             local hum = p.Character:FindFirstChildOfClass("Humanoid")
@@ -320,7 +334,7 @@ local function startCacheLoop()
     end)
 end
 
--- ===================== V4-GUN =====================
+-- ===================== V5-GUN =====================
 local function findGunEquipped()
     local char = LP.Character
     if not char then return nil end
@@ -376,7 +390,7 @@ local function equipGunIfNeeded()
     return findGunEquipped() ~= nil
 end
 
--- ===================== V4-REMOTE =====================
+-- ===================== V5-REMOTE =====================
 local shootRemote = nil
 
 local function resolveShootRemote()
@@ -424,7 +438,8 @@ local function resolveShootRemote()
     return nil
 end
 
--- Один вызов. Порядок (camCF, targetPos) — уточняется хуком.
+-- [6] Основной вызов. По F9-логам может быть (UserId, CFrame) или (Player, Vector3) —
+-- уточняем через Debug Hook и Debug Shot (Часть 2).
 local function fireShoot(targetPos, camCF)
     local remote = resolveShootRemote()
     if not remote then return false, "no_remote" end
@@ -434,120 +449,99 @@ local function fireShoot(targetPos, camCF)
     return ok
 end
 
--- ===================== V4-HOOK =====================
+-- ===================== V5-HOOK =====================
+-- [3] Правильный хук через getrawmetatable + setreadonly
 local hookInstalled = false
 
--- [2] Правильная обёртка через newcclosure + checkcaller
 local function installFireServerHook()
     if hookInstalled then return end
     hookInstalled = true
 
-    -- checkcaller: если наш собственный вызов — не логируем
-    local hasCheckCaller = (type(checkcaller) == "function")
-    local hasHookMeta    = (type(hookmetamethod) == "function")
+    local hasGetRawMeta  = (type(getrawmetatable) == "function")
+    local hasSetReadonly = (type(setreadonly)    == "function")
+    local hasNewCClosure = (type(newcclosure)    == "function")
+    local hasCheckCaller = (type(checkcaller)    == "function")
     local hasGetNamecall = (type(getnamecallmethod) == "function")
-    local hasNewCClosure = (type(newcclosure) == "function")
 
-    if not (hasHookMeta and hasGetNamecall) then
-        print("[FlickV4-HOOK] hookmetamethod/getnamecallmethod недоступны. Работаем вслепую.")
+    if not (hasGetRawMeta and hasSetReadonly and hasGetNamecall) then
+        print("[FlickV5-HOOK] нет примитивов (getrawmetatable/setreadonly/getnamecallmethod). Хук пропущен.")
         return
     end
 
-    -- тело-обёртка
-    local function wrapper(self, ...)
-        local method = getnamecallmethod()
-        if method == "FireServer"
-            and typeof(self) == "Instance"
-            and self:IsA("RemoteEvent")
-            and not (hasCheckCaller and checkcaller())   -- пропускаем наши вызовы
-        then
-            local name   = self.Name
-            local parent = self.Parent
-            local pName  = parent and parent.Name or ""
-            local pPath  = parent and parent:GetFullName() or "?"
-
-            local isShoot = (string.lower(name) == "shoot")
-                or string.find(string.lower(pName), "gun")
-                or string.find(string.lower(pName), "shoot")
-
-            if isShoot and Config.DebugHook then
-                local args = { ... }
-                print(("[FlickV4-HOOK] FireServer → %s"):format(pPath))
-                print(("                args count = %d"):format(#args))
-                for i = 1, #args do
-                    local v = args[i]
-                    print(("                arg[%d] = (%s) %s"):format(
-                        i, typeof(v), tostring(v)))
-                end
-            end
-        end
-        return self
+    local okMt, mt = pcall(getrawmetatable, game)
+    if not okMt or type(mt) ~= "table" then
+        print("[FlickV5-HOOK] getrawmetatable(game) вернул не таблицу.")
+        return
     end
 
-    -- правильная обёртка
+    local oldNamecall = mt.__namecall
+    if type(oldNamecall) ~= "function" then
+        print("[FlickV5-HOOK] mt.__namecall отсутствует.")
+        return
+    end
+
+    local function logFireServer(self, ...)
+        local method = getnamecallmethod()
+        if method ~= "FireServer" then return end
+
+        local isRemote = false
+        pcall(function()
+            isRemote = (typeof(self) == "Instance") and self:IsA("RemoteEvent")
+        end)
+        if not isRemote then return end
+
+        if hasCheckCaller and checkcaller() then return end  -- не логируем себя
+
+        local name   = self.Name
+        local parent = self.Parent
+        local pName  = parent and parent.Name or ""
+        local pPath  = parent and parent:GetFullName() or "?"
+
+        local isShoot = (string.lower(name) == "shoot")
+            or string.find(string.lower(pName), "gun")
+            or string.find(string.lower(pName), "shoot")
+
+        if isShoot and Config.DebugHook then
+            local args = table.pack(...)
+            print(("[FlickV5-HOOK] FireServer → %s | nargs=%d")
+                :format(pPath, args.n))
+            for i = 1, args.n do
+                local v = args[i]
+                print(("  arg[%d] : %s = %s"):format(i, typeof(v), tostring(v)))
+            end
+        end
+    end
+
+    -- обёртка, которая зовёт оригинал
+    local function wrapper(self, ...)
+        logFireServer(self, ...)
+        return oldNamecall(self, ...)
+    end
+
     local wrapped = wrapper
     if hasNewCClosure then
         local okW, res = pcall(newcclosure, wrapper)
-        if okW and type(res) == "function" then
-            wrapped = res
-        end
+        if okW and type(res) == "function" then wrapped = res end
     end
 
-    -- hookmetamethod возвращает оригинал
-    local okHook, original = pcall(hookmetamethod, game, "__namecall", wrapped)
-    if not okHook or type(original) ~= "function" then
-        print("[FlickV4-HOOK] hookmetamethod упал. Работаем вслепую.")
+    -- записываем в метатаблицу
+    local okR = pcall(setreadonly, mt, false)
+    if not okR then
+        print("[FlickV5-HOOK] setreadonly(mt, false) упал.")
         return
     end
 
-    -- теперь внутри wrapped заменяем `return self` на вызов оригинала
-    -- проще: пересоздать wrapped с вызовом original
-    local function wrapper2(self, ...)
-        local method = getnamecallmethod()
-        if method == "FireServer"
-            and typeof(self) == "Instance"
-            and self:IsA("RemoteEvent")
-            and not (hasCheckCaller and checkcaller())
-        then
-            local name   = self.Name
-            local parent = self.Parent
-            local pName  = parent and parent.Name or ""
-            local pPath  = parent and parent:GetFullName() or "?"
+    mt.__namecall = wrapped
 
-            local isShoot = (string.lower(name) == "shoot")
-                or string.find(string.lower(pName), "gun")
-                or string.find(string.lower(pName), "shoot")
+    pcall(setreadonly, mt, true)
 
-            if isShoot and Config.DebugHook then
-                local args = { ... }
-                print(("[FlickV4-HOOK] FireServer → %s"):format(pPath))
-                print(("                args count = %d"):format(#args))
-                for i = 1, #args do
-                    local v = args[i]
-                    print(("                arg[%d] = (%s) %s"):format(
-                        i, typeof(v), tostring(v)))
-                end
-            end
-        end
-        return original(self, ...)
-    end
-
-    local wrapped2 = wrapper2
-    if hasNewCClosure then
-        local okW2, res2 = pcall(newcclosure, wrapper2)
-        if okW2 and type(res2) == "function" then
-            wrapped2 = res2
-        end
-    end
-
-    pcall(hookmetamethod, game, "__namecall", wrapped2)
-    print("[FlickV4-HOOK] установлен. DebugHook=" .. tostring(Config.DebugHook))
+    print("[FlickV5-HOOK] установлен. DebugHook=" .. tostring(Config.DebugHook))
     if not Config.DebugHook then
-        print("[FlickV4-HOOK] Включи DebugHook в GUI и выстрели вручную — увидишь сигнатуру.")
+        print("[FlickV5-HOOK] Включи Debug Hook в GUI и выстрели вручную — получишь сигнатуру.")
     end
 end
 
--- ===================== V4-WALL =====================
+-- ===================== V5-WALL =====================
 local function hasLineOfSight(targetPos)
     local char = LP.Character
     if not char then return false end
@@ -569,7 +563,7 @@ local function hasLineOfSight(targetPos)
     return hit == nil
 end
 
--- ===================== V4-FLICK =====================
+-- ===================== V5-FLICK =====================
 local firing      = false
 local lastFlickAt = 0
 
@@ -579,7 +573,6 @@ local function computeCameraCFrame(targetPos)
     return CFrame.lookAt(cam.CFrame.Position, targetPos)
 end
 
--- Тело крутится в pcall. Без restore-залипания AutoRotate.
 local function visualBodyFlick(targetPos, instant)
     local char = LP.Character
     if not char then return end
@@ -618,21 +611,39 @@ local function visualBodyFlick(targetPos, instant)
     pcall(function() hum.AutoRotate = wasAuto end)
 end
 
--- [3] firing проверяется ДО lastFlickAt; сброс firing в pcall-finally
--- [4] task.spawn внутри — эту функцию уже зовут из task.spawn
--- [9] visualBodyFlick ПЕРЕД fireShoot
+-- Просто вычисление параметров выстрела — используется flick() и Debug Shot в Части 2
+local function computeShot()
+    local murderer = murdererCache
+    if not murderer or not murderer.Parent or not murderer.Character then
+        return nil, "no_cached_murderer"
+    end
+    local tRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
+    local tHum  = murderer.Character:FindFirstChildOfClass("Humanoid")
+    if not tRoot or not tHum or tHum.Health <= 0 then
+        return nil, "murderer_unavailable"
+    end
+    local targetPos = predictedPosition(tRoot)
+    if Config.WallCheck and not hasLineOfSight(targetPos) then
+        return nil, "wall"
+    end
+    local camCF = computeCameraCFrame(targetPos)
+    if not camCF then return nil, "no_camera" end
+    return {
+        murderer  = murderer,
+        targetPos = targetPos,
+        camCF     = camCF,
+        remote    = resolveShootRemote(),
+    }
+end
+
 local function flick()
     if not isCurrentInstance() then return end
-
     if not Config.Enabled then
         notify("Flick disabled.", 1)
         return
     end
-
-    -- [3] сначала проверяем firing
     if firing then return end
 
-    -- затем rate-limit
     local now = os.clock()
     if now - lastFlickAt < Config.FlickCooldown then return end
     lastFlickAt = now
@@ -640,67 +651,59 @@ local function flick()
     firing = true
 
     local okRun, err = pcall(function()
-        local murderer = murdererCache
-        if not murderer or not murderer.Parent or not murderer.Character then
-            notify("No cached murderer", 1)
+        local shot, reason = computeShot()
+        if not shot then
+            if reason == "no_cached_murderer" then
+                notify("No cached murderer", 1)
+            elseif reason == "murderer_unavailable" then
+                notify("Murderer unavailable.", 1)
+            elseif reason == "wall" then
+                notify("Wall between you and target.", 1)
+            elseif reason == "no_camera" then
+                -- тихо
+            end
             return
         end
 
-        local tRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
-        local tHum  = murderer.Character:FindFirstChildOfClass("Humanoid")
-        if not tRoot or not tHum or tHum.Health <= 0 then
-            notify("Murderer unavailable.", 1)
+        -- Сначала визуальный поворот, потом выстрел
+        visualBodyFlick(shot.targetPos, Config.InstantFlick)
+
+        if not Config.AutoShoot then return end
+        if not findGunAnywhere() then
+            notify("No Gun in inventory.", 1)
+            return
+        end
+        if not equipGunIfNeeded() then
+            notify("Equip timeout.", 1)
+            return
+        end
+        if not shot.remote then
+            notify("Shoot remote not found.", 1)
             return
         end
 
-        local targetPos = predictedPosition(tRoot)
-
-        if Config.WallCheck and not hasLineOfSight(targetPos) then
-            notify("Wall between you and target.", 1)
-            return
+        local okFire = fireShoot(shot.targetPos, shot.camCF)
+        if not okFire then
+            notify("Fire failed.", 1)
         end
 
-        local camCF = computeCameraCFrame(targetPos)
-        if not camCF then return end
-
-        -- [9] Сначала поворачиваем тело, чтобы сервер видел нас "смотрящими"
-        visualBodyFlick(targetPos, Config.InstantFlick)
-
-        if Config.AutoShoot then
-            if not findGunAnywhere() then
-                notify("No Gun in inventory.", 1)
-                return
-            end
-            if not equipGunIfNeeded() then
-                notify("Equip timeout.", 1)
-                return
-            end
-
-            local okFire = fireShoot(targetPos, camCF)
-            if not okFire then
-                notify("Fire failed.", 1)
-            end
-
-            if Config.AutoUnequip then unequipGun() end
-        end
+        if Config.AutoUnequip then unequipGun() end
     end)
 
-    -- [3] pcall-finally: firing точно сбрасывается
     firing = false
-
     if not okRun and err then
-        warn("[FlickV4] flick error: " .. tostring(err))
+        warn("[FlickV5] flick error: " .. tostring(err))
     end
 end
 
--- ===================== V4-KEYBIND =====================
+-- ===================== V5-KEYBIND =====================
 local waitingForBind = false
 local keyConn = nil
 
 local function setupKeybind()
     if keyConn then keyConn:Disconnect() end
     keyConn = UIS.InputBegan:Connect(function(input, processed)
-        if processed then return end
+        -- [1] Сначала bind-режим — даже если processed=true
         if waitingForBind then
             waitingForBind = false
             if input.KeyCode ~= Enum.KeyCode.Unknown then
@@ -710,8 +713,9 @@ local function setupKeybind()
             end
             return
         end
+
+        if processed then return end
         if input.KeyCode == Enum.KeyCode[Config.Keybind] then
-            -- [4] не блокируем обработчик
             task.spawn(flick)
         end
     end)
@@ -729,12 +733,13 @@ local function startBind()
     end)
 end
 
--- ===================== V4-EXPORT =====================
-getgenv()._flickV4Disconnect = disconnectAll
+-- ===================== V5-EXPORT =====================
+getgenv()._flickV5Disconnect = disconnectAll
 
-getgenv()._flickV4 = {
+getgenv()._flickV5 = {
     Config        = Config,
-    Flick         = flick,                -- в UI звать через task.spawn
+    Flick         = flick,                -- из GUI звать через task.spawn
+    ComputeShot   = computeShot,          -- для Debug Shot в Части 2
     StartBind     = startBind,
     Notify        = notify,
     Save          = saveConfig,
@@ -746,6 +751,7 @@ getgenv()._flickV4 = {
     Version       = { script = SCRIPT_VERSION, config = CONFIG_VERSION },
     FireShoot     = fireShoot,
     ResolveRemote = resolveShootRemote,
+    GetRawRemote  = function() return resolveShootRemote() end,
 }
 
 -- ===================== BOOTSTRAP =====================
@@ -753,46 +759,43 @@ installFireServerHook()
 startCacheLoop()
 setupKeybind()
 
-notify("Flick MM2 v4 ready. " .. Config.Keybind .. " = flick.", 2)
-print(("[FlickV4] Часть 1 OK · script=%s · config=%d · token=%s")
+notify("Flick MM2 v5 ready. " .. Config.Keybind .. " = flick.", 2)
+print(("[FlickV5] Часть 1 OK · script=%s · config=%d · token=%s")
     :format(SCRIPT_VERSION, CONFIG_VERSION, INSTANCE_TOKEN))
-print("[FlickV4] Ядро загружено. Скажи 'дальше' для Части 2 (GUI).")
+print("[FlickV5] Ядро загружено. Скажи 'дальше' для Части 2 (GUI + Debug Shot).")
 --[[
     ╔══════════════════════════════════════════════════════════════╗
-    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 4.0.0             ║
-    ║  Часть 2 / 2 — GUI                                           ║
+    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 5.0.0             ║
+    ║  Часть 2 / 2 — GUI + Debug Shot                              ║
     ║                                                              ║
-    ║  Требует Части 1 (getgenv()._flickV4).                       ║
-    ║                                                              ║
-    ║  ИСПРАВЛЕНИЯ:                                                ║
-    ║   [2] Все коннекты через Track → Unload/перезапуск чистит     ║
-    ║   [4] Кнопка "Flick Now" → task.spawn, не блокирует поток    ║
-    ║   [7] Toggle Debug Hook прямо в UI                           ║
-    ║   [8] Unload → Disconnect() (биндит к V4.Disconnect)         ║
+    ║  Требует Части 1 (getgenv()._flickV5).                       ║
+    ║  UI строго в PlayerGui (без gethui/CoreGui).                 ║
     ║                                                              ║
     ║  СЕКЦИИ:                                                     ║
-    ║   G4-THEME · G4-DRAG · G4-WIDGETS · G4-BUILD · G4-BOOT       ║
+    ║   G5-THEME · G5-DRAG · G5-WIDGETS · G5-BUILD · G5-BOOT       ║
     ╚══════════════════════════════════════════════════════════════╝
 ]]
 
-local V4 = getgenv()._flickV4
-if not V4 then
-    error("[FlickV4] Часть 1 не загружена. Сначала выполни её.")
+local V5 = getgenv()._flickV5
+if not V5 then
+    error("[FlickV5] Часть 1 не загружена. Сначала выполни её.")
 end
 
-local Config     = V4.Config
-local Notify     = V4.Notify
-local Save       = V4.Save
-local SafeParent = V4.SafeParent
-local StartBind  = V4.StartBind
-local GetCache   = V4.GetCache
-local Track      = V4.Track
-local Disconnect = V4.Disconnect
-local Flick      = V4.Flick
+local Config     = V5.Config
+local Notify     = V5.Notify
+local Save       = V5.Save
+local SafeParent = V5.SafeParent
+local StartBind  = V5.StartBind
+local GetCache   = V5.GetCache
+local Track      = V5.Track
+local Disconnect = V5.Disconnect
+local Flick      = V5.Flick
+local ComputeShot   = V5.ComputeShot
+local ResolveRemote = V5.ResolveRemote
 
 local UIS = game:GetService("UserInputService")
 
--- ===================== G4-THEME =====================
+-- ===================== G5-THEME =====================
 local Theme = {
     bg         = Color3.fromRGB(18, 18, 22),
     panel      = Color3.fromRGB(24, 24, 30),
@@ -808,9 +811,10 @@ local Theme = {
     boxBg      = Color3.fromRGB(20, 20, 26),
     stroke     = Color3.fromRGB(45, 45, 55),
     danger     = Color3.fromRGB(180, 70, 70),
+    debug      = Color3.fromRGB(140, 100, 60),
 }
 
--- ===================== G4-DRAG =====================
+-- ===================== G5-DRAG =====================
 local function makeDraggable(gui, handle, clickThreshold)
     clickThreshold = clickThreshold or 5
     local dragging  = false
@@ -851,7 +855,7 @@ local function makeDraggable(gui, handle, clickThreshold)
     end
 end
 
--- ===================== G4-WIDGETS =====================
+-- ===================== G5-WIDGETS =====================
 local W = {}
 
 function W.section(scroll, text)
@@ -1066,15 +1070,15 @@ function W.button(scroll, label, onClick, color)
     return btn
 end
 
--- ===================== G4-BUILD =====================
+-- ===================== G5-BUILD =====================
 local function build()
     local parent = SafeParent()
 
-    local old = parent:FindFirstChild("FlickMM2V4")
+    local old = parent:FindFirstChild("FlickMM2V5")
     if old then pcall(function() old:Destroy() end) end
 
     local gui = Instance.new("ScreenGui")
-    gui.Name = "FlickMM2V4"
+    gui.Name = "FlickMM2V5"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
@@ -1106,8 +1110,8 @@ local function build()
     -- ---------- MAIN FRAME ----------
     local frame = Instance.new("Frame")
     frame.Name = "MainFrame"
-    frame.Size = UDim2.new(0, 320, 0, 600)
-    frame.Position = UDim2.new(0.5, -160, 0.5, -300)
+    frame.Size = UDim2.new(0, 320, 0, 620)
+    frame.Position = UDim2.new(0.5, -160, 0.5, -310)
     frame.BackgroundColor3 = Theme.bg
     frame.BorderSizePixel = 0
     frame.Visible = false
@@ -1152,7 +1156,7 @@ local function build()
     ver.Size = UDim2.new(0, 60, 1, 0)
     ver.Position = UDim2.new(1, -76, 0, 0)
     ver.BackgroundTransparency = 1
-    ver.Text = "v" .. (V4.Version and V4.Version.script or "4.0.0")
+    ver.Text = "v" .. (V5.Version and V5.Version.script or "5.0.0")
     ver.TextColor3 = Theme.textDim
     ver.Font = Enum.Font.Gotham
     ver.TextSize = 11
@@ -1204,7 +1208,7 @@ local function build()
     W.toggle(scroll, "Auto Shoot", "AutoShoot")
     W.toggle(scroll, "Auto Unequip After Shot", "AutoUnequip")
     W.toggle(scroll, "Wall Check (Raycast from HRP)", "WallCheck")
-    W.slider(scroll, "Equip Timeout (s)", "EquipTimeout", 0.1, 1.0, true, 0.01)
+    W.slider(scroll, "Equip Timeout (s)", "EquipTimeout", 0.3, 3.0, true, 0.1)
 
     W.section(scroll, "AIM PREDICT")
     W.toggle(scroll, "Predict", "PredictEnabled")
@@ -1215,14 +1219,64 @@ local function build()
 
     W.section(scroll, "SYSTEM")
     W.toggle(scroll, "Notifications", "Notifications")
-    W.toggle(scroll, "Debug Hook (Print FireServer args)", "DebugHook")
+    W.toggle(scroll, "Debug Hook (log FireServer args)", "DebugHook")
     W.slider(scroll, "Cache Interval (s)", "CacheInterval", 0.25, 5.0, true, 0.05)
 
-    -- ---------- QUICK ACTIONS ----------
+    -- ---------- ACTIONS ----------
     W.section(scroll, "ACTIONS")
-    W.button(scroll, "🎯 FLICK NOW (task.spawn)", function()
+
+    W.button(scroll, "🎯 FLICK NOW", function()
         task.spawn(Flick)
     end, Color3.fromRGB(60, 80, 60))
+
+    -- [6] Debug Shot: пробный выстрел + полный вывод аргументов в F9
+    W.button(scroll, "🐞 DEBUG SHOT (log args)", function()
+        task.spawn(function()
+            local shot, reason = ComputeShot()
+            if not shot then
+                print(("[FlickV5-DebugShot] aborted: %s"):format(tostring(reason)))
+                Notify("Debug Shot: " .. tostring(reason), 2)
+                return
+            end
+
+            local remote = shot.remote or ResolveRemote()
+            if not remote then
+                print("[FlickV5-DebugShot] no shoot remote found")
+                Notify("Debug Shot: no remote", 2)
+                return
+            end
+
+            print("=================================================")
+            print("[FlickV5-DebugShot] remote: " .. remote:GetFullName())
+            print(("[FlickV5-DebugShot] target: %s (HRP at %s)")
+                :format(shot.murderer.Name, tostring(shot.targetPos)))
+            print("[FlickV5-DebugShot] firing signature (camCF, targetPos):")
+            print(("  arg[1] = (CFrame)  %s"):format(tostring(shot.camCF)))
+            print(("  arg[2] = (Vector3) %s"):format(tostring(shot.targetPos)))
+
+            -- пробуем (camCF, targetPos) — основная сигнатура
+            local ok = pcall(function()
+                remote:FireServer(shot.camCF, shot.targetPos)
+            end)
+            print(("[FlickV5-DebugShot] FireServer (camCF, targetPos) -> %s")
+                :format(ok and "sent" or "error"))
+
+            -- пробуем (targetPos, camCF) — альтернативный порядок
+            if Config.DebugHook then
+                task.wait(0.1)
+                local ok2 = pcall(function()
+                    remote:FireServer(shot.targetPos, shot.camCF)
+                end)
+                print(("[FlickV5-DebugShot] FireServer (targetPos, camCF) -> %s")
+                    :format(ok2 and "sent" or "error"))
+                print("[FlickV5-DebugShot] Проверь F9: какой из двух зашёл — тот и порядок.")
+            end
+
+            print("[FlickV5-DebugShot] Смотри F9 — все события FireServer должны быть видны (при DebugHook=on).")
+            print("=================================================")
+            Notify("Debug Shot fired. See F9.", 2)
+        end)
+    end, Theme.debug)
 
     local bindBtn = W.button(scroll,
         "⌨️ BIND: " .. Config.Keybind,
@@ -1257,7 +1311,7 @@ local function build()
         end
     end)
 
-    -- ---------- FINAL ACTIONS ----------
+    -- ---------- FINAL ----------
     W.button(scroll, "👁 Hide GUI", function()
         frame.Visible = false
     end, Color3.fromRGB(40, 40, 50))
@@ -1270,11 +1324,11 @@ local function build()
     W.button(scroll, "💀 Unload (stop script)", function()
         Notify("Unloading...", 2)
         task.wait(0.05)
-        pcall(Disconnect)       -- [8] отключает бинд, кэш, нотификации
+        pcall(Disconnect)
         pcall(function() gui:Destroy() end)
     end, Theme.danger)
 
-    -- ---------- FLOATING CLICK (drag vs click) ----------
+    -- ---------- FLOATING CLICK ----------
     Track(circle.MouseButton1Click:Connect(function()
         local _, isDrag = getDragState()
         if isDrag then return end
@@ -1288,10 +1342,10 @@ local function build()
     return gui
 end
 
--- ===================== G4-BOOT =====================
+-- ===================== G5-BOOT =====================
 local builtGui = build()
 
-Notify("GUI v4 ready. " .. Config.Keybind .. " = flick. ⚡ to open.", 3)
-print(("[FlickV4] Часть 2 OK · script=%s · config=%d")
-    :format(V4.Version.script, V4.Version.config))
-print("[FlickV4] Полный скрипт загружен.")
+Notify("GUI v5 ready. " .. Config.Keybind .. " = flick. ⚡ to open.", 3)
+print(("[FlickV5] Часть 2 OK · script=%s · config=%d")
+    :format(V5.Version.script, V5.Version.config))
+print("[FlickV5] Полный скрипт загружен. Debug Shot — в ACTIONS.")
