@@ -1,10 +1,10 @@
 --[[
     Flick To Murderer - Autonomous
-    Version: 1.5.0 (Orbit Camera Fix + Config Save Fix)
+    Version: 1.6.0 (Camera Overlap Fix)
     Target: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
 
-local VERSION = "1.5.0"
+local VERSION = "1.6.0"
 
 -- ========== SERVICES ==========
 local Players = game:GetService("Players")
@@ -127,7 +127,6 @@ local function getIntentVelocity(part)
     return smoothed
 end
 
--- ========== AIRBORNE CHECK ==========
 local function isAirborne(part)
     local char = part.Parent
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -182,6 +181,54 @@ local function computeTargetPosition(part)
     return part.Position + serverOffset + predictOffset + legacyPing
 end
 
+-- ========== GLOBAL CAMERA STATE ==========
+local camState = {
+    locked = false,
+    originalType = nil,
+    originalSubject = nil,
+    autoRotateLocked = false,
+    originalAutoRotate = nil,
+    session = false,
+}
+
+local lastCameraCFrame = nil
+local lastCameraRootPos = nil
+local returnToken = 0
+local flickLerpToken = 0
+
+local function lockCamState(cam, hum)
+    if not camState.locked and cam then
+        camState.locked = true
+        camState.originalType = cam.CameraType
+        camState.originalSubject = cam.CameraSubject
+        cam.CameraType = Enum.CameraType.Scriptable
+    end
+    if not camState.autoRotateLocked and hum then
+        camState.autoRotateLocked = true
+        camState.originalAutoRotate = hum.AutoRotate
+        hum.AutoRotate = false
+    end
+end
+
+local function unlockCamState(cam, hum)
+    if camState.locked then
+        camState.locked = false
+        if cam and cam.Parent then
+            if camState.originalType then cam.CameraType = camState.originalType end
+            if camState.originalSubject then cam.CameraSubject = camState.originalSubject end
+        end
+        camState.originalType = nil
+        camState.originalSubject = nil
+    end
+    if camState.autoRotateLocked then
+        camState.autoRotateLocked = false
+        if hum and hum.Parent and camState.originalAutoRotate ~= nil then
+            hum.AutoRotate = camState.originalAutoRotate
+        end
+        camState.originalAutoRotate = nil
+    end
+end
+
 -- ========== VISUALIZER ==========
 local visualPart, visualBeam, visualAttach0, visualAttach1 = nil, nil, nil, nil
 local function createVisualizer()
@@ -228,10 +275,6 @@ function DragSystem.MakeDraggable(gui, dragArea, onPositionChanged)
 end
 
 -- ========== CORE ==========
-local lastCameraCFrame = nil
-local lastCameraRootPos = nil
-local returnToken = 0
-
 function findMurderer()
     if game.PlaceId == 142823291 then
         local success, roleData = pcall(function() local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true); if remote and remote:IsA("RemoteFunction") then return remote:InvokeServer() end end)
@@ -265,14 +308,12 @@ end
 local function fireOnce(targetPos)
     local cam = workspace.CurrentCamera
     if not cam then return end
-
     local remote = findShootRemote()
     if remote then
         pcall(function() remote:FireServer(targetPos) end)
         pcall(function() remote:FireServer(CFrame.new(targetPos)) end)
         pcall(function() remote:FireServer({ cam.CFrame, CFrame.new(targetPos) }) end)
     end
-
     local char = LocalPlayer.Character
     if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid")
@@ -285,25 +326,26 @@ local function fireOnce(targetPos)
     end
 end
 
-local function returnCameraWithRandomness(token, onDone)
-    local function done() if onDone then onDone() end end
-    if token and token ~= returnToken then return done() end
-    if not Config.ReturnCamera or not lastCameraCFrame then return done() end
+local function returnCameraWithRandomness(token)
+    if not Config.ReturnCamera or not lastCameraCFrame then return false end
+    if token and token ~= returnToken then return false end
+
+    local savedCFrame = lastCameraCFrame
+    local savedRootPos = lastCameraRootPos
 
     local cam = workspace.CurrentCamera
     local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
     local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
-    local newLook = (lastCameraCFrame.LookVector + lastCameraCFrame.RightVector * randomX + lastCameraCFrame.UpVector * randomY).Unit
+    local newLook = (savedCFrame.LookVector + savedCFrame.RightVector * randomX + savedCFrame.UpVector * randomY).Unit
 
-    local targetCFrame = lastCameraCFrame
+    local targetCFrame
     local char = LocalPlayer.Character
     local rootPart = char and char:FindFirstChild("HumanoidRootPart")
-
-    if rootPart and lastCameraRootPos then
-        local offsetPos = lastCameraCFrame.Position - lastCameraRootPos
-        targetCFrame = CFrame.new(rootPart.Position + offsetPos) * (lastCameraCFrame - lastCameraCFrame.Position)
+    if rootPart and savedRootPos then
+        local offsetPos = savedCFrame.Position - savedRootPos
+        targetCFrame = CFrame.new(rootPart.Position + offsetPos) * (savedCFrame - savedCFrame.Position)
     else
-        targetCFrame = CFrame.lookAt(lastCameraCFrame.Position, lastCameraCFrame.Position + newLook)
+        targetCFrame = CFrame.lookAt(savedCFrame.Position, savedCFrame.Position + newLook)
     end
 
     local oldCFrame = cam.CFrame
@@ -312,12 +354,11 @@ local function returnCameraWithRandomness(token, onDone)
     local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
 
     for i = 1, steps do
-        if token and token ~= returnToken then return done() end
-        cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps); task.wait(totalTime / steps)
+        if token and token ~= returnToken then return false end
+        cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps)
+        task.wait(totalTime / steps)
     end
-    lastCameraCFrame = nil
-    lastCameraRootPos = nil
-    done()
+    return true
 end
 
 function flickToMurderer()
@@ -333,54 +374,47 @@ function flickToMurderer()
     local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then notify("Target part not found!", 1) return end
 
-    if Config.ReturnCamera then
+    -- Save return position ONLY on fresh session
+    if Config.ReturnCamera and not camState.session then
         lastCameraCFrame = cam.CFrame
         lastCameraRootPos = rootPart.Position
+        camState.session = true
     end
 
-    local prevAutoRotate = hum.AutoRotate; local prevCamType = cam.CameraType; local prevCamSubject = cam.CameraSubject
-    local camLocked = false
-
-    if Config.CameraLock then cam.CameraType = Enum.CameraType.Scriptable; camLocked = true end
-    if Config.AutoRotateLock then hum.AutoRotate = false end
-
-    local function restoreCam()
-        if camLocked and cam and cam.Parent then cam.CameraType = prevCamType; if prevCamSubject then cam.CameraSubject = prevCamSubject end end
-    end
-    local function restoreAutoRotate()
-        if hum and hum.Parent then hum.AutoRotate = prevAutoRotate end
-    end
+    -- Lock camera/autorotate (idempotent, saves original only once)
+    lockCamState(Config.CameraLock and cam or nil, Config.AutoRotateLock and hum or nil)
 
     local targetPos = computeTargetPosition(targetPart)
-    if not targetPos then notify("Cannot get target position!", 1); restoreCam(); restoreAutoRotate(); return end
+    if not targetPos then notify("Cannot get target position!", 1) return end
 
     local flatTarget = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
     local dir = flatTarget - rootPart.Position
-    if dir.Magnitude < 0.01 then restoreCam(); restoreAutoRotate(); return end
+    if dir.Magnitude < 0.01 then return end
     local newHRPCFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + dir.Unit)
 
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
     local isFirstPerson = (cam.CFrame.Position - headPos).Magnitude < 5
     local newCamCFrame
-
     if isFirstPerson then
         newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
     else
         local offset = cam.CFrame.Position - rootPart.Position
         local flatOffset = Vector3.new(offset.X, 0, offset.Z)
         local flatTargetDir = Vector3.new(targetPos.X - rootPart.Position.X, 0, targetPos.Z - rootPart.Position.Z)
-
         if flatOffset.Magnitude > 0.1 and flatTargetDir.Magnitude > 0.1 then
             local targetAngle = math.atan2(-flatTargetDir.X, -flatTargetDir.Z)
             local currentAngle = math.atan2(flatOffset.X, flatOffset.Z)
             local angle = targetAngle - currentAngle
-            
             local rotatedOffset = CFrame.Angles(0, angle, 0) * offset
             newCamCFrame = CFrame.lookAt(rootPart.Position + rotatedOffset, targetPos)
         else
             newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
         end
     end
+
+    -- Lerp token (abort if newer flick starts)
+    flickLerpToken = flickLerpToken + 1
+    local myFlickToken = flickLerpToken
 
     if Config.InstantFlick then
         rootPart.CFrame = newHRPCFrame; cam.CFrame = newCamCFrame
@@ -390,17 +424,23 @@ function flickToMurderer()
         local totalTime = math.clamp(angleDist / (Config.FlickSpeed * 2), 0.01, 0.35)
         local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
         for i = 1, steps do
-            if not rootPart.Parent then break end
-            local a = i / steps; rootPart.CFrame = oldHRP:Lerp(newHRPCFrame, a); cam.CFrame = oldCFrame:Lerp(newCamCFrame, a); task.wait(totalTime / steps)
+            if flickLerpToken ~= myFlickToken then return end
+            if not rootPart.Parent then return end
+            local a = i / steps
+            rootPart.CFrame = oldHRP:Lerp(newHRPCFrame, a)
+            cam.CFrame = oldCFrame:Lerp(newCamCFrame, a)
+            task.wait(totalTime / steps)
         end
     end
 
     if Config.ReplicationSync then RunService.Heartbeat:Wait(); RunService.Heartbeat:Wait() end
+    if flickLerpToken ~= myFlickToken then return end
 
     if Config.AutoShoot then
         if Config.BurstFire then
             local count = math.max(1, math.floor(Config.BurstCount)); local delay = math.max(0, Config.BurstDelay / 1000)
             for i = 1, count do
+                if flickLerpToken ~= myFlickToken then return end
                 local tp = murderer.Character and (murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart"))
                 if not tp or not tp.Parent then break end
                 local p = computeTargetPosition(tp)
@@ -425,13 +465,30 @@ function flickToMurderer()
         end
     end
 
-    task.delay(0.05, restoreAutoRotate)
+    -- Schedule return with unique token
+    returnToken = returnToken + 1
+    local myToken = returnToken
 
     if Config.ReturnCamera then
-        returnToken = returnToken + 1; local myToken = returnToken
-        task.spawn(function() task.wait(Config.ReturnDelay / 1000); returnCameraWithRandomness(myToken, restoreCam) end)
+        task.spawn(function()
+            task.wait(Config.ReturnDelay / 1000)
+            local success = returnCameraWithRandomness(myToken)
+            if myToken == returnToken then
+                if success then
+                    lastCameraCFrame = nil
+                    lastCameraRootPos = nil
+                end
+                camState.session = false
+                unlockCamState(cam, hum)
+            end
+        end)
     else
-        task.delay(0.05, restoreCam)
+        task.delay(0.05, function()
+            if myToken == returnToken then
+                camState.session = false
+                unlockCamState(cam, hum)
+            end
+        end)
     end
 end
 
@@ -446,7 +503,7 @@ local function setupKeybind()
             if input.KeyCode ~= Enum.KeyCode.Unknown then Config.Keybind = input.KeyCode.Name; saveConfig(); notify("Keybind set to: " .. Config.Keybind, 1) end
             return
         end
-        if input.KeyCode == Enum.KeyCode[Config.Keybind] then flickToMurderer() end
+        if input.KeyCode == Enum.KeyCode[Config.Keybind] then task.spawn(flickToMurderer) end
     end)
 end
 
@@ -467,7 +524,6 @@ local function createMainGUI()
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
 
     local Title = Instance.new("TextLabel", MainFrame); Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5)
-    -- ВЕРСИЯ В ЗАГОЛОВКЕ
     Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK " .. VERSION; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
     DragSystem.MakeDraggable(MainFrame, Title)
 
@@ -577,6 +633,23 @@ local function createMainGUI()
     bindBtn.MouseButton1Click:Connect(function()
         waitingForBind = true; bindBtn.Text = "⌨ PRESS ANY KEY..."; task.wait(3)
         if waitingForBind then waitingForBind = false; bindBtn.Text = "⌨ SET KEYBIND: " .. Config.Keybind end
+    end)
+
+    -- Diagnostic button
+    addButton("🩺 DEBUG CAMERA STATE", function()
+        local cam = workspace.CurrentCamera
+        print("========== CAMERA DEBUG ==========")
+        print("CameraType:", cam and tostring(cam.CameraType))
+        print("CameraSubject:", cam and tostring(cam.CameraSubject))
+        print("camState.locked:", camState.locked)
+        print("camState.originalType:", tostring(camState.originalType))
+        print("camState.session:", camState.session)
+        print("camState.autoRotateLocked:", camState.autoRotateLocked)
+        print("returnToken:", returnToken)
+        print("flickLerpToken:", flickLerpToken)
+        print("lastCameraCFrame:", lastCameraCFrame and tostring(lastCameraCFrame.Position) or "nil")
+        print("==================================")
+        notify("Camera state printed to console", 2)
     end)
 
     addButton("👁 HIDE GUI", function() MainFrame.Visible = false; notify("GUI hidden", 2) end)
