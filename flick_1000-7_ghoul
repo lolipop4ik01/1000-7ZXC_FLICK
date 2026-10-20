@@ -1,15 +1,14 @@
 --[[
     Flick To Murderer - Autonomous
-    Version: 2.0.0 (Clean Rewrite - No Camera Lock)
+    Version: 2.1.0 (Mouse Aim + Instant Body Rotate + Fast Shot)
     Target: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
 
-local VERSION = "2.0.0"
+local VERSION = "2.1.0"
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
@@ -20,13 +19,12 @@ local LocalPlayer = Players.LocalPlayer
 local GRAVITY = Workspace.Gravity or 196.2
 
 local Config = {
-    Enabled = false,
+    Enabled = true, -- Включено по умолчанию
     Keybind = "F",
-    InstantFlick = true,
-    FlickSpeed = 100,
-    AutoShoot = false,
+    InstantFlick = true, -- Мгновенный флик
+    AutoShoot = true, -- Включено по умолчанию
     AutoUnequip = true,
-    RotateBody = false,
+    MouseAim = false, -- НОВОЕ: двигать мышку в цель
     NotificationsEnabled = true,
     TargetPart = "HumanoidRootPart",
     ShowPredictVisual = false,
@@ -37,11 +35,7 @@ local Config = {
     GravityPredict = true,
     VelocitySmooth = true,
     BunnyHopDetect = true,
-    FloorCeilingClamp = false,   -- по умолчанию OFF (много raycast'ов = лаг)
-    WallProximity = false,
-    PathRaycast = false,
     ServerSidePredict = true,
-    PingComp = false,
     ReplicationSync = true,
     BurstFire = false,
     BurstCount = 2,
@@ -112,8 +106,7 @@ local function detectBunnyHop(part)
     local now = tick()
     if state ~= d.lastState then
         if state == Enum.HumanoidStateType.Landed or state == Enum.HumanoidStateType.Jumping then
-            d.changes = d.changes + 1
-            d.lastChange = now
+            d.changes = d.changes + 1; d.lastChange = now
         end
         d.lastState = state
     end
@@ -150,30 +143,7 @@ local function isAirborne(part)
     local hum = part.Parent and part.Parent:FindFirstChildOfClass("Humanoid")
     if not hum then return false end
     local state = hum:GetState()
-    return state == Enum.HumanoidStateType.Freefall
-        or state == Enum.HumanoidStateType.Jumping
-        or state == Enum.HumanoidStateType.FallingDown
-end
-
-local function getFloorCeiling(part)
-    if not Config.FloorCeilingClamp then return -math.huge, math.huge end
-    local pos = part.Position
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {part.Parent}
-    local downHit = workspace:Raycast(pos, Vector3.new(0, -50, 0), params)
-    local upHit = workspace:Raycast(pos, Vector3.new(0, 50, 0), params)
-    return (downHit and downHit.Position.Y + 2 or -math.huge), (upHit and upHit.Position.Y - 1 or math.huge)
-end
-
-local function getWallDistance(part, direction)
-    if not Config.WallProximity then return math.huge end
-    if direction.Magnitude < 0.01 then return math.huge end
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {part.Parent}
-    local hit = workspace:Raycast(part.Position, direction.Unit * 10, params)
-    return hit and (hit.Position - part.Position).Magnitude or math.huge
+    return state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.FallingDown
 end
 
 local function computeTargetPosition(part)
@@ -182,9 +152,7 @@ local function computeTargetPosition(part)
     if not vel then return part.Position end
 
     local serverOffset = Vector3.zero
-    if Config.ServerSidePredict then
-        serverOffset = vel * (getPing() * 0.5)
-    end
+    if Config.ServerSidePredict then serverOffset = vel * (getPing() * 0.5) end
 
     local predictOffset = Vector3.zero
     if Config.PredictEnabled then
@@ -194,10 +162,8 @@ local function computeTargetPosition(part)
             if multXZ > 0 then multXZ = 1 / multXZ end
             if multY > 0 then multY = 1 / multY end
         end
-
         local isBunny = detectBunnyHop(part)
         local airborne = isAirborne(part)
-
         local predX = vel.X * multXZ
         local predZ = vel.Z * multXZ
         local predY = 0
@@ -210,35 +176,9 @@ local function computeTargetPosition(part)
         else
             predY = vel.Y * multY
         end
-
-        if Config.WallProximity then
-            local hDir = Vector3.new(predX, 0, predZ)
-            if hDir.Magnitude > 0.01 then
-                local wd = getWallDistance(part, hDir)
-                if wd < 3 then
-                    local maxD = math.max(0.5, wd - 0.5)
-                    local mag = hDir.Magnitude
-                    if mag > maxD then predX = predX * (maxD / mag); predZ = predZ * (maxD / mag) end
-                end
-            end
-        end
-
-        if Config.FloorCeilingClamp then
-            local fy, cy = getFloorCeiling(part)
-            local finalY = part.Position.Y + predY
-            if finalY < fy then predY = fy - part.Position.Y end
-            if finalY > cy then predY = cy - part.Position.Y end
-        end
-
         predictOffset = Vector3.new(predX, predY, predZ)
     end
-
-    local legacyPing = Vector3.zero
-    if Config.PingComp then
-        legacyPing = vel * (getPing() * 0.5)
-    end
-
-    return part.Position + serverOffset + predictOffset + legacyPing
+    return part.Position + serverOffset + predictOffset
 end
 
 local visualPart, visualBeam, visualAttach0, visualAttach1 = nil, nil, nil, nil
@@ -255,35 +195,27 @@ end
 
 local function updateVisualizer()
     if not Config.ShowPredictVisual then
-        if visualPart then visualPart.Transparency = 1 end
-        if visualBeam then visualBeam.Enabled = false end
-        return
+        if visualPart then visualPart.Transparency = 1 end; if visualBeam then visualBeam.Enabled = false end; return
     end
     local murderer = findMurderer()
     if not murderer or not murderer.Character then
-        if visualPart then visualPart.Transparency = 1 end
-        if visualBeam then visualBeam.Enabled = false end
-        return
+        if visualPart then visualPart.Transparency = 1 end; if visualBeam then visualBeam.Enabled = false end; return
     end
     local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then
-        if visualPart then visualPart.Transparency = 1 end
-        if visualBeam then visualBeam.Enabled = false end
-        return
+        if visualPart then visualPart.Transparency = 1 end; if visualBeam then visualBeam.Enabled = false end; return
     end
     createVisualizer()
-    visualPart.Position = computeTargetPosition(targetPart)
-    visualPart.Transparency = 0.3
-    visualBeam.Enabled = true
+    visualPart.Position = computeTargetPosition(targetPart); visualPart.Transparency = 0.3; visualBeam.Enabled = true
     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if hrp then visualAttach0.Parent = hrp; visualAttach0.Position = Vector3.new(0, 1, 0) else visualAttach0.Parent = visualPart; visualAttach0.Position = Vector3.zero end
 end
 
 local DragSystem = {}
-function DragSystem.MakeDraggable(gui, dragArea, onPositionChanged)
+function DragSystem.MakeDraggable(gui, dragArea)
     local dragging, dragStart, startPos = false, nil, nil
     dragArea.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; dragStart = input.Position; startPos = gui.Position end end)
-    dragArea.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then dragging = false; if onPositionChanged then onPositionChanged() end end end)
+    dragArea.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then dragging = false end end)
     UserInputService.InputChanged:Connect(function(input)
         if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
             local delta = input.Position - dragStart; gui.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
@@ -321,39 +253,37 @@ local function findShootRemote()
     return gunFolder:FindFirstChild("Shoot")
 end
 
-local function hasClearPath(targetPos)
-    local char = LocalPlayer.Character
-    if not char then return false end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return false end
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {char}
-    local hit = workspace:Raycast(hrp.Position, targetPos - hrp.Position, params)
-    return hit == nil
-end
-
 local function fireOnce(targetPos)
     local cam = workspace.CurrentCamera
     if not cam then return end
-    if Config.PathRaycast and not hasClearPath(targetPos) then return end
+
     local remote = findShootRemote()
     if remote then
         pcall(function() remote:FireServer(targetPos) end)
         pcall(function() remote:FireServer(CFrame.new(targetPos)) end)
         pcall(function() remote:FireServer({ cam.CFrame, CFrame.new(targetPos) }) end)
     end
+
     local char = LocalPlayer.Character
     if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid")
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     local gun = char:FindFirstChild("Gun") or (backpack and backpack:FindFirstChild("Gun"))
+    
     if gun and gun:IsA("Tool") and hum then
-        if gun.Parent ~= char then pcall(function() hum:EquipTool(gun) end); task.wait(0.05) end
+        if gun.Parent ~= char then 
+            pcall(function() hum:EquipTool(gun) end)
+            RunService.Heartbeat:Wait() -- Даем 1 кадр на экипировку
+        end
         pcall(function() gun:Activate() end)
-        pcall(function() local vu = game:GetService("VirtualUser"); vu:Button1Down(Vector2.zero); vu:Button1Up(Vector2.zero) end)
+        pcall(function() 
+            local vu = game:GetService("VirtualUser")
+            vu:Button1Down(Vector2.zero)
+            vu:Button1Up(Vector2.zero) 
+        end)
+        
         if Config.AutoUnequip then
-            task.delay(0.1, function()
+            task.delay(0.3, function() -- Увеличил задержку до 0.3с, чтобы сервер успел засчитать выстрел
                 if gun and gun.Parent == char and hum then
                     pcall(function() hum:UnequipTools() end)
                     local bp = LocalPlayer:FindFirstChild("Backpack")
@@ -364,7 +294,6 @@ local function fireOnce(targetPos)
     end
 end
 
--- Упрощённая камера: без Lock, без LockCenter, без блокировки потока
 local function restoreCameraToCustom()
     local cam = workspace.CurrentCamera
     if cam then
@@ -394,32 +323,35 @@ function flickToMurderer()
     local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then notify("Target part not found!", 1) return end
 
-    -- Сохраняем камеру только если ещё не сохранена (защита от перекрытия)
     if not savedCamCFrame then
         savedCamCFrame = cam.CFrame
         savedRootPos = rootPart.Position
     end
 
     local targetPos = computeTargetPosition(targetPart)
-    if not targetPos then notify("Cannot get target position!", 1) return end
+    if not targetPos then return end
 
-    -- Поворот тела опционально
-    if Config.RotateBody then
-        local flat = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
-        local dir = flat - rootPart.Position
-        if dir.Magnitude > 0.01 then
-            rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + dir.Unit)
-        end
+    -- 1. СОХРАНЯЕМ AutoRotate и ВЫКЛЮЧАЕМ его (чтобы повернуть тело)
+    local prevAutoRotate = hum.AutoRotate
+    hum.AutoRotate = false
+
+    -- 2. ПОВОРАЧИВАЕМ ТЕЛО (Сервер требует, чтобы ты смотрел на цель для выстрела)
+    local flat = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
+    local dir = flat - rootPart.Position
+    if dir.Magnitude > 0.01 then
+        rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + dir.Unit)
     end
 
-    -- Камера: переводим в Scriptable один раз и ставим нужный CFrame
+    -- 3. ПОВОРАЧИВАЕМ КАМЕРУ
     cam.CameraType = Enum.CameraType.Scriptable
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
     local isFirstPerson = (cam.CFrame.Position - headPos).Magnitude < 5
     local newCamCFrame
+    
     if isFirstPerson then
         newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
     else
+        -- Прицеливаемся от 3 лица, сохраняя дистанцию
         local camOffset = cam.CFrame.Position - rootPart.Position
         local distance = Vector3.new(camOffset.X, 0, camOffset.Z).Magnitude
         local height = camOffset.Y
@@ -428,88 +360,75 @@ function flickToMurderer()
         newCamCFrame = CFrame.lookAt(newCamPos, targetPos)
     end
 
-    flickToken = flickToken + 1
-    local myFlickToken = flickToken
-
     if Config.InstantFlick then
         cam.CFrame = newCamCFrame
     else
         local oldCF = cam.CFrame
-        local steps = 8
-        local dur = math.clamp(0.15 / (Config.FlickSpeed / 100), 0.05, 0.3)
+        local steps = 5
         for i = 1, steps do
-            if flickToken ~= myFlickToken then restoreCameraToCustom(); return end
             cam.CFrame = oldCF:Lerp(newCamCFrame, i / steps)
-            task.wait(dur / steps)
+            task.wait(0.01)
         end
     end
 
-    if Config.ReplicationSync then task.wait(0.015) end
-    if flickToken ~= myFlickToken then restoreCameraToCustom(); return end
+    -- 4. ЕСЛИ ВКЛЮЧЕН MOUSE AIM - ДВИГАЕМ МЫШКУ
+    if Config.MouseAim then
+        local screenPos, onScreen = cam:WorldToScreenPoint(targetPos)
+        if onScreen and mousemoverel then
+            local deltaX = screenPos.X - cam.ViewportSize.X / 2
+            local deltaY = screenPos.Y - cam.ViewportSize.Y / 2
+            pcall(function() mousemoverel(deltaX, deltaY) end)
+            RunService.Heartbeat:Wait() -- Ждем 1 кадр, чтобы мышь обновилась
+        end
+    end
+
+    -- 5. ЖДЕМ РЕПЛИКАЦИЮ И СТРЕЛЯЕМ
+    if Config.ReplicationSync then RunService.Heartbeat:Wait() end
 
     if Config.AutoShoot then
-        if Config.BurstFire then
-            local count = math.max(1, math.floor(Config.BurstCount))
-            local delay = math.max(0, Config.BurstDelay / 1000)
-            for i = 1, count do
-                if flickToken ~= myFlickToken then break end
-                local tp = murderer.Character and (murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart"))
-                if not tp or not tp.Parent then break end
-                local p = computeTargetPosition(tp)
-                if p then
-                    cam.CFrame = CFrame.lookAt(cam.CFrame.Position, p)
-                    fireOnce(p)
-                end
-                if i < count and delay > 0 then task.wait(delay) end
-            end
-        else
-            local tp = murderer.Character and (murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart"))
-            local p = tp and computeTargetPosition(tp)
-            if p then
-                cam.CFrame = CFrame.lookAt(cam.CFrame.Position, p)
-                fireOnce(p)
-            end
+        local tp = murderer.Character and (murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart"))
+        local p = tp and computeTargetPosition(tp)
+        if p then
+            cam.CFrame = CFrame.lookAt(cam.CFrame.Position, p)
+            fireOnce(p)
         end
     end
 
+    -- 6. ВОЗВРАТ КАМЕРЫ И AUTOROTATE
     returnToken = returnToken + 1
     local myReturnToken = returnToken
 
-    if Config.ReturnCamera then
-        task.spawn(function()
-            task.wait(Config.ReturnDelay / 1000)
-            if myReturnToken ~= returnToken then return end
-            local oldCF = cam.CFrame
-            local targetCF = savedCamCFrame
-            if not targetCF then restoreCameraToCustom(); savedCamCFrame = nil; savedRootPos = nil; return end
+    task.delay(Config.ReturnDelay / 1000, function()
+        if myReturnToken ~= returnToken then return end
+        local oldCF = cam.CFrame
+        local targetCF = savedCamCFrame
+        if currentRoot then
             local currentRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
             if currentRoot and savedRootPos then
                 local off = targetCF.Position - savedRootPos
                 targetCF = CFrame.new(currentRoot.Position + off) * (targetCF - targetCF.Position)
             end
-            local randX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
-            local randY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
-            local newLook = (targetCF.LookVector + targetCF.RightVector * randX + targetCF.UpVector * randY).Unit
-            targetCF = CFrame.lookAt(targetCF.Position, targetCF.Position + newLook)
-            local angleDist = math.acos(math.clamp(oldCF.LookVector:Dot(targetCF.LookVector), -1, 1))
-            local totalTime = math.clamp(angleDist / (Config.ReturnSpeed * 2), 0.05, 0.35)
-            local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
-            for i = 1, steps do
-                if myReturnToken ~= returnToken then return end
-                cam.CFrame = oldCF:Lerp(targetCF, i / steps)
-                task.wait(totalTime / steps)
-            end
-            if myReturnToken == returnToken then
-                restoreCameraToCustom()
-                savedCamCFrame = nil
-                savedRootPos = nil
-            end
-        end)
-    else
-        task.delay(0.05, function()
-            if myReturnToken == returnToken then restoreCameraToCustom(); savedCamCFrame = nil; savedRootPos = nil end
-        end)
-    end
+        end
+        
+        local randX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
+        local randY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
+        local newLook = (targetCF.LookVector + targetCF.RightVector * randX + targetCF.UpVector * randY).Unit
+        targetCF = CFrame.lookAt(targetCF.Position, targetCF.Position + newLook)
+
+        local steps = 10
+        for i = 1, steps do
+            if myReturnToken ~= returnToken then return end
+            cam.CFrame = oldCF:Lerp(targetCF, i / steps)
+            task.wait(0.02)
+        end
+
+        if myReturnToken == returnToken then
+            restoreCameraToCustom()
+            if hum and hum.Parent then hum.AutoRotate = prevAutoRotate end -- Восстанавливаем AutoRotate
+            savedCamCFrame = nil
+            savedRootPos = nil
+        end
+    end)
 end
 
 local waitingForBind = false
@@ -604,12 +523,11 @@ local function createMainGUI()
     addSection("CORE")
     addToggle("🔘 FLICK", function() return Config.Enabled end, function(v) Config.Enabled = v end)
     addToggle("⚡ INSTANT FLICK", function() return Config.InstantFlick end, function(v) Config.InstantFlick = v end)
-    addSlider("FLICK SPEED", 1, 200, function() return Config.FlickSpeed end, function(v) Config.FlickSpeed = v end)
+    addToggle("🔫 AUTO SHOOT", function() return Config.AutoShoot end, function(v) Config.AutoShoot = v end)
+    addToggle("🖱 MOUSE AIM", function() return Config.MouseAim end, function(v) Config.MouseAim = v end)
 
     addSection("TARGET")
     addDropdown("TARGET PART", bodyParts, function() return Config.TargetPart end, function(v) Config.TargetPart = v end)
-    addToggle("🔄 ROTATE BODY", function() return Config.RotateBody end, function(v) Config.RotateBody = v end)
-    addToggle("🔫 AUTO SHOOT", function() return Config.AutoShoot end, function(v) Config.AutoShoot = v end)
     addToggle("🧹 AUTO UNEQUIP", function() return Config.AutoUnequip end, function(v) Config.AutoUnequip = v end)
     addToggle("👁 SHOW PREDICT VISUAL", function() return Config.ShowPredictVisual end, function(v) Config.ShowPredictVisual = v end)
 
@@ -617,7 +535,6 @@ local function createMainGUI()
     addToggle("🎯 AIM PREDICT", function() return Config.PredictEnabled end, function(v) Config.PredictEnabled = v end)
     addToggle("📡 SERVER-SIDE PREDICT", function() return Config.ServerSidePredict end, function(v) Config.ServerSidePredict = v end)
     addToggle("🌊 VELOCITY SMOOTHING", function() return Config.VelocitySmooth end, function(v) Config.VelocitySmooth = v end)
-    addToggle("📶 PING COMP (LEGACY)", function() return Config.PingComp end, function(v) Config.PingComp = v end)
     addToggle("🏀 GRAVITY PREDICT (Y)", function() return Config.GravityPredict end, function(v) Config.GravityPredict = v end)
     local opBtn = addButton("⚙ PREDICT OP: " .. Config.PredictOp, function()
         Config.PredictOp = Config.PredictOp == "Multiply" and "Divide" or "Multiply"; opBtn.Text = "⚙ PREDICT OP: " .. Config.PredictOp; saveConfig(); notify("Predict Op: " .. Config.PredictOp, 1)
@@ -625,24 +542,10 @@ local function createMainGUI()
     addSlider("PREDICT X/Z (SEC)", 0.001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true)
     addSlider("PREDICT Y (SEC)", 0.001, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
 
-    addSection("ADVANCED PHYSICS")
-    addToggle("🐰 BUNNY-HOP DETECT", function() return Config.BunnyHopDetect end, function(v) Config.BunnyHopDetect = v end)
-    addToggle("📐 FLOOR/CEILING CLAMP", function() return Config.FloorCeilingClamp end, function(v) Config.FloorCeilingClamp = v end)
-    addToggle("🧱 WALL PROXIMITY", function() return Config.WallProximity end, function(v) Config.WallProximity = v end)
-    addToggle("📏 PATH RAYCAST", function() return Config.PathRaycast end, function(v) Config.PathRaycast = v end)
-
-    addSection("ACCURACY")
-    addToggle("🕒 REPLICATION SYNC", function() return Config.ReplicationSync end, function(v) Config.ReplicationSync = v end)
-    addToggle("💥 BURST FIRE", function() return Config.BurstFire end, function(v) Config.BurstFire = v end)
-    addSlider("BURST COUNT", 1, 5, function() return Config.BurstCount end, function(v) Config.BurstCount = v end)
-    addSlider("BURST DELAY (MS)", 0, 200, function() return Config.BurstDelay end, function(v) Config.BurstDelay = v end)
-
     addSection("CAMERA RETURN")
     addToggle("🔄 AUTO RETURN CAMERA", function() return Config.ReturnCamera end, function(v) Config.ReturnCamera = v end)
     addSlider("RETURN SPEED", 1, 200, function() return Config.ReturnSpeed end, function(v) Config.ReturnSpeed = v end)
     addSlider("RETURN DELAY (MS)", 0, 2000, function() return Config.ReturnDelay end, function(v) Config.ReturnDelay = v end)
-    addSlider("RANDOM X %", 0, 100, function() return Config.ReturnRandomnessX end, function(v) Config.ReturnRandomnessX = v end)
-    addSlider("RANDOM Y %", 0, 100, function() return Config.ReturnRandomnessY end, function(v) Config.ReturnRandomnessY = v end)
 
     addSection("SETTINGS")
     addToggle("🔔 NOTIFICATIONS", function() return Config.NotificationsEnabled end, function(v) Config.NotificationsEnabled = v end)
@@ -657,10 +560,7 @@ local function createMainGUI()
     addButton("🔄 FORCE RESET CAMERA", function()
         restoreCameraToCustom()
         pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.Default end)
-        savedCamCFrame = nil
-        savedRootPos = nil
-        flickToken = flickToken + 1
-        returnToken = returnToken + 1
+        savedCamCFrame = nil; savedRootPos = nil; flickToken = flickToken + 1; returnToken = returnToken + 1
         notify("Camera reset to default", 2)
     end)
 
