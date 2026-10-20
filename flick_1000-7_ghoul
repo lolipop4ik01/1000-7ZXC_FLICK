@@ -1,5 +1,5 @@
 --[[
-    Flick To Murderer - Autonomous (God-Tier Accuracy + Camera Fix)
+    Flick To Murderer - Autonomous (Gravity Predict Fix)
     Updated for: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
 
@@ -14,6 +14,7 @@ local Stats = game:GetService("Stats")
 local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
+local GRAVITY = Workspace.Gravity or 196.2
 
 -- ========== CONFIG ==========
 local Config = {
@@ -29,7 +30,8 @@ local Config = {
     PredictEnabled = true,
     PredictOp = "Multiply",
     PredictXZ = 0.091,
-    PredictY = 0.011,
+    PredictY = 0.15,
+    GravityPredict = true,   -- НОВОЕ: баллистическая Y-формула
     VelocitySmooth = true,
 
     ServerSidePredict = true,
@@ -60,6 +62,12 @@ local function loadConfig()
     end)
 end
 loadConfig()
+
+-- Migration: если старый конфиг имел PredictY < 0.05 (слишком мало для видимого эффекта), поднимем до 0.15
+if Config.PredictY and Config.PredictY < 0.05 then
+    Config.PredictY = 0.15
+    pcall(saveConfig)
+end
 
 -- ========== HELPERS ==========
 local function getSafeParent()
@@ -122,32 +130,63 @@ local function getIntentVelocity(part)
     return smoothed
 end
 
--- ========== PREDICT ==========
+-- ========== ПРОВЕРКА AIRBORNE ==========
+local function isAirborne(part)
+    local char = part.Parent
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    local state = hum:GetState()
+    return state == Enum.HumanoidStateType.Freefall
+        or state == Enum.HumanoidStateType.Jumping
+        or state == Enum.HumanoidStateType.FallingDown
+end
+
+-- ========== PREDICT (С ГРАВИТАЦИЕЙ) ==========
 local function computeTargetPosition(part)
     if not part then return nil end
     local vel = getIntentVelocity(part)
     if not vel then return part.Position end
 
+    -- Server-side lag: БЕЗ обнуления Y
     local serverOffset = Vector3.zero
     if Config.ServerSidePredict then
-        local ping = getPing(); serverOffset = vel * (ping * 0.5)
-        if part.Name == "HumanoidRootPart" then serverOffset = Vector3.new(serverOffset.X, 0, serverOffset.Z) end
+        local ping = getPing()
+        serverOffset = vel * (ping * 0.5)
     end
 
+    -- Predict offset
     local predictOffset = Vector3.zero
     if Config.PredictEnabled then
-        local multXZ = Config.PredictXZ; local multY = (part.Name == "HumanoidRootPart") and 0 or Config.PredictY
+        local multXZ = Config.PredictXZ
+        local multY = Config.PredictY
         if Config.PredictOp == "Divide" then
-            if multXZ > 0 then multXZ = 1 / multXZ end; if multY > 0 then multY = 1 / multY end
+            if multXZ > 0 then multXZ = 1 / multXZ end
+            if multY > 0 then multY = 1 / multY end
         end
-        predictOffset = Vector3.new(vel.X * multXZ, vel.Y * multY, vel.Z * multXZ)
+
+        local predX = vel.X * multXZ
+        local predZ = vel.Z * multXZ
+        local predY
+
+        if Config.GravityPredict and isAirborne(part) then
+            -- Баллистика: y(t) = y0 + v0*t - 0.5*g*t^2
+            local t = multY
+            predY = vel.Y * t - 0.5 * GRAVITY * t * t
+        else
+            -- Линейно (на земле Y-скорость ~0, формула просто даёт 0)
+            predY = vel.Y * multY
+        end
+
+        predictOffset = Vector3.new(predX, predY, predZ)
     end
 
+    -- Legacy ping comp: БЕЗ обнуления Y
     local legacyPing = Vector3.zero
     if Config.PingComp then
-        local ping = getPing(); legacyPing = vel * (ping * 0.5)
-        if part.Name == "HumanoidRootPart" then legacyPing = Vector3.new(legacyPing.X, 0, legacyPing.Z) end
+        local ping = getPing()
+        legacyPing = vel * (ping * 0.5)
     end
+
     return part.Position + serverOffset + predictOffset + legacyPing
 end
 
@@ -258,28 +297,28 @@ local function returnCameraWithRandomness(token, onDone)
     local function done() if onDone then onDone() end end
     if token and token ~= returnToken then return done() end
     if not Config.ReturnCamera or not lastCameraCFrame then return done() end
-    
+
     local cam = workspace.CurrentCamera
     local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
     local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
     local newLook = (lastCameraCFrame.LookVector + lastCameraCFrame.RightVector * randomX + lastCameraCFrame.UpVector * randomY).Unit
-    
+
     local targetCFrame = lastCameraCFrame
     local char = LocalPlayer.Character
     local rootPart = char and char:FindFirstChild("HumanoidRootPart")
-    
+
     if rootPart and lastCameraRootPos then
         local offsetPos = lastCameraCFrame.Position - lastCameraRootPos
         targetCFrame = CFrame.new(rootPart.Position + offsetPos) * (lastCameraCFrame - lastCameraCFrame.Position)
     else
         targetCFrame = CFrame.lookAt(lastCameraCFrame.Position, lastCameraCFrame.Position + newLook)
     end
-    
+
     local oldCFrame = cam.CFrame
     local angleDist = math.acos(math.clamp(oldCFrame.LookVector:Dot(targetCFrame.LookVector), -1, 1))
     local totalTime = math.clamp(angleDist / (Config.ReturnSpeed * 2), 0.01, 0.35)
     local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
-    
+
     for i = 1, steps do
         if token and token ~= returnToken then return done() end
         cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps); task.wait(totalTime / steps)
@@ -302,11 +341,11 @@ function flickToMurderer()
     local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then notify("Target part not found!", 1) return end
 
-    if Config.ReturnCamera then 
-        lastCameraCFrame = cam.CFrame 
-        lastCameraRootPos = rootPart.Position 
+    if Config.ReturnCamera then
+        lastCameraCFrame = cam.CFrame
+        lastCameraRootPos = rootPart.Position
     end
-    
+
     local prevAutoRotate = hum.AutoRotate; local prevCamType = cam.CameraType; local prevCamSubject = cam.CameraSubject
     local camLocked = false
 
@@ -331,14 +370,14 @@ function flickToMurderer()
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
     local isFirstPerson = (cam.CFrame.Position - headPos).Magnitude < 5
     local newCamCFrame
-    
+
     if isFirstPerson then
         newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
     else
         local offset = cam.CFrame.Position - rootPart.Position
         local flatOffset = Vector3.new(offset.X, 0, offset.Z)
         local flatTargetDir = Vector3.new(targetPos.X - rootPart.Position.X, 0, targetPos.Z - rootPart.Position.Z)
-        
+
         if flatOffset.Magnitude > 0.1 and flatTargetDir.Magnitude > 0.1 then
             local angle = math.atan2(flatTargetDir.X, flatTargetDir.Z) - math.atan2(flatOffset.X, flatOffset.Z)
             local rotatedOffset = CFrame.Angles(0, angle, 0) * offset
@@ -433,7 +472,7 @@ local function createMainGUI()
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
 
     local Title = Instance.new("TextLabel", MainFrame); Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5)
-    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK (CAMERA FIXED)"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
+    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK (GRAVITY FIX)"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
     DragSystem.MakeDraggable(MainFrame, Title)
 
     local Container = Instance.new("ScrollingFrame", MainFrame); Container.Size = UDim2.new(1, -20, 1, -50); Container.Position = UDim2.new(0, 10, 0, 45)
@@ -512,11 +551,12 @@ local function createMainGUI()
     addToggle("📡 SERVER-SIDE PREDICT", function() return Config.ServerSidePredict end, function(v) Config.ServerSidePredict = v end)
     addToggle("🌊 VELOCITY SMOOTHING", function() return Config.VelocitySmooth end, function(v) Config.VelocitySmooth = v end)
     addToggle("📶 PING COMP (LEGACY)", function() return Config.PingComp end, function(v) Config.PingComp = v end)
+    addToggle("🏀 GRAVITY PREDICT (Y)", function() return Config.GravityPredict end, function(v) Config.GravityPredict = v end)
     local opBtn = addButton("⚙ PREDICT OP: " .. Config.PredictOp, function()
         Config.PredictOp = Config.PredictOp == "Multiply" and "Divide" or "Multiply"; opBtn.Text = "⚙ PREDICT OP: " .. Config.PredictOp; saveConfig(); notify("Predict Op: " .. Config.PredictOp, 1)
     end)
-    addSlider("PREDICT X/Z", 0.001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true)
-    addSlider("PREDICT Y", 0.001, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
+    addSlider("PREDICT X/Z (SEC)", 0.001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true)
+    addSlider("PREDICT Y (SEC)", 0.01, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
 
     addSection("ACCURACY LAYERS")
     addToggle("🕒 REPLICATION SYNC", function() return Config.ReplicationSync end, function(v) Config.ReplicationSync = v end)
@@ -562,5 +602,5 @@ getgenv().flickToMurderer = flickToMurderer
 setupKeybind()
 createMainGUI()
 
-notify("⚡ FLICK (CAMERA FIXED) LOADED ⚡", 3)
-print("Flick To Murderer loaded - Camera Bug Fixed")
+notify("⚡ FLICK (GRAVITY FIX) LOADED ⚡", 3)
+print("Flick To Murderer loaded - Gravity Predict Enabled")
