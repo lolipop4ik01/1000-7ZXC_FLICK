@@ -1,10 +1,10 @@
 --[[
     Flick To Murderer - Autonomous
-    Version: 1.6.0 (Camera Overlap Fix)
+    Version: 1.6.1 (Camera Position Freeze Fix)
     Target: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
 
-local VERSION = "1.6.0"
+local VERSION = "1.6.1"
 
 -- ========== SERVICES ==========
 local Players = game:GetService("Players")
@@ -29,14 +29,12 @@ local Config = {
     NotificationsEnabled = true,
     TargetPart = "HumanoidRootPart",
     ShowPredictVisual = false,
-
     PredictEnabled = true,
     PredictOp = "Multiply",
     PredictXZ = 0.091,
     PredictY = 0.15,
     GravityPredict = true,
     VelocitySmooth = true,
-
     ServerSidePredict = true,
     PingComp = false,
     ReplicationSync = true,
@@ -45,7 +43,6 @@ local Config = {
     BurstFire = false,
     BurstCount = 2,
     BurstDelay = 40,
-
     ReturnCamera = true,
     ReturnSpeed = 120,
     ReturnRandomnessX = 25,
@@ -374,14 +371,12 @@ function flickToMurderer()
     local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then notify("Target part not found!", 1) return end
 
-    -- Save return position ONLY on fresh session
     if Config.ReturnCamera and not camState.session then
         lastCameraCFrame = cam.CFrame
         lastCameraRootPos = rootPart.Position
         camState.session = true
     end
 
-    -- Lock camera/autorotate (idempotent, saves original only once)
     lockCamState(Config.CameraLock and cam or nil, Config.AutoRotateLock and hum or nil)
 
     local targetPos = computeTargetPosition(targetPart)
@@ -392,32 +387,15 @@ function flickToMurderer()
     if dir.Magnitude < 0.01 then return end
     local newHRPCFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + dir.Unit)
 
-    local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
-    local isFirstPerson = (cam.CFrame.Position - headPos).Magnitude < 5
-    local newCamCFrame
-    if isFirstPerson then
-        newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
-    else
-        local offset = cam.CFrame.Position - rootPart.Position
-        local flatOffset = Vector3.new(offset.X, 0, offset.Z)
-        local flatTargetDir = Vector3.new(targetPos.X - rootPart.Position.X, 0, targetPos.Z - rootPart.Position.Z)
-        if flatOffset.Magnitude > 0.1 and flatTargetDir.Magnitude > 0.1 then
-            local targetAngle = math.atan2(-flatTargetDir.X, -flatTargetDir.Z)
-            local currentAngle = math.atan2(flatOffset.X, flatOffset.Z)
-            local angle = targetAngle - currentAngle
-            local rotatedOffset = CFrame.Angles(0, angle, 0) * offset
-            newCamCFrame = CFrame.lookAt(rootPart.Position + rotatedOffset, targetPos)
-        else
-            newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
-        end
-    end
+    -- ФИКС: позиция камеры не меняется, только LookVector
+    local newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
 
-    -- Lerp token (abort if newer flick starts)
     flickLerpToken = flickLerpToken + 1
     local myFlickToken = flickLerpToken
 
     if Config.InstantFlick then
-        rootPart.CFrame = newHRPCFrame; cam.CFrame = newCamCFrame
+        rootPart.CFrame = newHRPCFrame
+        cam.CFrame = newCamCFrame
     else
         local oldCFrame = cam.CFrame; local oldHRP = rootPart.CFrame
         local angleDist = math.acos(math.clamp(oldCFrame.LookVector:Dot((targetPos - oldCFrame.Position).Unit), -1, 1))
@@ -465,7 +443,6 @@ function flickToMurderer()
         end
     end
 
-    -- Schedule return with unique token
     returnToken = returnToken + 1
     local myToken = returnToken
 
@@ -492,7 +469,7 @@ function flickToMurderer()
     end
 end
 
--- ========== KEYBIND & VISUAL LOOP ==========
+-- ========== KEYBIND ==========
 local waitingForBind = false
 local function setupKeybind()
     if getgenv().KeybindConnection then pcall(function() getgenv().KeybindConnection:Disconnect() end) end
@@ -635,19 +612,17 @@ local function createMainGUI()
         if waitingForBind then waitingForBind = false; bindBtn.Text = "⌨ SET KEYBIND: " .. Config.Keybind end
     end)
 
-    -- Diagnostic button
     addButton("🩺 DEBUG CAMERA STATE", function()
         local cam = workspace.CurrentCamera
         print("========== CAMERA DEBUG ==========")
         print("CameraType:", cam and tostring(cam.CameraType))
         print("CameraSubject:", cam and tostring(cam.CameraSubject))
+        print("Camera Pos:", cam and tostring(cam.CFrame.Position))
         print("camState.locked:", camState.locked)
         print("camState.originalType:", tostring(camState.originalType))
         print("camState.session:", camState.session)
-        print("camState.autoRotateLocked:", camState.autoRotateLocked)
         print("returnToken:", returnToken)
         print("flickLerpToken:", flickLerpToken)
-        print("lastCameraCFrame:", lastCameraCFrame and tostring(lastCameraCFrame.Position) or "nil")
         print("==================================")
         notify("Camera state printed to console", 2)
     end)
