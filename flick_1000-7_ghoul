@@ -1,7 +1,10 @@
 --[[
-    Flick To Murderer - Autonomous (Camera Orbit Fix + Config Fix)
-    Updated for: ReplicatedStorage.Remotes.Gun.Shoot
+    Flick To Murderer - Autonomous
+    Version: 1.5.0 (Orbit Camera Fix + Config Save Fix)
+    Target: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
+
+local VERSION = "1.5.0"
 
 -- ========== SERVICES ==========
 local Players = game:GetService("Players")
@@ -124,7 +127,7 @@ local function getIntentVelocity(part)
     return smoothed
 end
 
--- ========== ПРОВЕРКА AIRBORNE ==========
+-- ========== AIRBORNE CHECK ==========
 local function isAirborne(part)
     local char = part.Parent
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -363,13 +366,11 @@ function flickToMurderer()
     if isFirstPerson then
         newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
     else
-        -- ИСПРАВЛЕННЫЙ РАСЧЕТ ДЛЯ 3 ЛИЦА (Орбитальное вращение без смены дистанции)
         local offset = cam.CFrame.Position - rootPart.Position
         local flatOffset = Vector3.new(offset.X, 0, offset.Z)
         local flatTargetDir = Vector3.new(targetPos.X - rootPart.Position.X, 0, targetPos.Z - rootPart.Position.Z)
 
         if flatOffset.Magnitude > 0.1 and flatTargetDir.Magnitude > 0.1 then
-            -- Вычисляем угол так, чтобы камера встала СЗАДИ персонажа (напротив цели)
             local targetAngle = math.atan2(-flatTargetDir.X, -flatTargetDir.Z)
             local currentAngle = math.atan2(flatOffset.X, flatOffset.Z)
             local angle = targetAngle - currentAngle
@@ -466,7 +467,8 @@ local function createMainGUI()
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
 
     local Title = Instance.new("TextLabel", MainFrame); Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5)
-    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK (ORBIT FIX)"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
+    -- ВЕРСИЯ В ЗАГОЛОВКЕ
+    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK " .. VERSION; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
     DragSystem.MakeDraggable(MainFrame, Title)
 
     local Container = Instance.new("ScrollingFrame", MainFrame); Container.Size = UDim2.new(1, -20, 1, -50); Container.Position = UDim2.new(0, 10, 0, 45)
@@ -549,7 +551,6 @@ local function createMainGUI()
     local opBtn = addButton("⚙ PREDICT OP: " .. Config.PredictOp, function()
         Config.PredictOp = Config.PredictOp == "Multiply" and "Divide" or "Multiply"; opBtn.Text = "⚙ PREDICT OP: " .. Config.PredictOp; saveConfig(); notify("Predict Op: " .. Config.PredictOp, 1)
     end)
-    -- Изменен минимум на 0.001, чтобы 0.011 не срезалось
     addSlider("PREDICT X/Z (SEC)", 0.001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true)
     addSlider("PREDICT Y (SEC)", 0.001, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
 
@@ -597,5 +598,5 @@ getgenv().flickToMurderer = flickToMurderer
 setupKeybind()
 createMainGUI()
 
-notify("⚡ FLICK (ORBIT FIX) LOADED ⚡", 3)
-print("Flick To Murderer loaded - Orbit Fix & Config Fix")
+notify("⚡ FLICK " .. VERSION .. " LOADED ⚡", 3)
+print("Flick To Murderer loaded - Version " .. VERSION)
