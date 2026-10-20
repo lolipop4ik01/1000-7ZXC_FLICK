@@ -1,6 +1,6 @@
 --[[
-    Flick To Murderer - Version 2.5.0
-    Camera Fix (Native MouseMove) + Wall Check + Bunny-Hop
+    Flick To Murderer - Version 2.6.0
+    Camera Fix: Relative Orbit Tracking (No detached camera)
 ]]
 
 local Players = game:GetService("Players")
@@ -24,8 +24,7 @@ local Config = {
     AutoShoot = true,
     AutoUnequip = true,
     RotateBody = false,
-    NativeMouseAim = true, -- НОВОЕ: Использовать mousemoverel (нативный поворот)
-    WallCheck = true,      -- НОВОЕ: Проверка стен перед выстрелом
+    WallCheck = true,
     NotificationsEnabled = true,
     TargetPart = "HumanoidRootPart",
     
@@ -37,12 +36,8 @@ local Config = {
     VelocitySmooth = true,
     ServerSidePredict = true,
     
-    ReplicationSync = true,
     ReturnCamera = true,
-    ReturnSpeed = 120,
-    ReturnRandomnessX = 25,
-    ReturnRandomnessY = 25,
-    ReturnDelay = 100,
+    ReturnDelay = 150,
 }
 
 local CONFIG_FILE = "flick_config_standalone.json"
@@ -169,10 +164,8 @@ local function computeTargetPosition(part)
         local airborne = state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping
         
         if Config.GravityPredict and airborne then
-            -- Баллистическая формула (для прыжков)
             py = vel.Y * my - 0.5 * GRAVITY * my * my
         else
-            -- Линейная (для бега по земле)
             py = vel.Y * my
         end
         off = off + Vector3.new(px, py, pz)
@@ -193,7 +186,7 @@ local function isWallBlocked(targetPos)
     return hit ~= nil
 end
 
--- ========== MURDERER FINDER ==========
+-- ========== FINDER & SHOOTER ==========
 local function findMurderer()
     if game.PlaceId == 142823291 then
         local ok, data = pcall(function()
@@ -226,7 +219,6 @@ local function findMurderer()
     return nil
 end
 
--- ========== FIRE ==========
 local function fireOnce(targetPos)
     local cam = workspace.CurrentCamera
     if not cam then return end
@@ -263,7 +255,9 @@ local function fireOnce(targetPos)
     end
 end
 
--- ========== FLICK LOGIC (CAMERA FIX) ==========
+-- ========== ФИКС КАМЕРЫ (RELATIVE ORBIT) ==========
+local flickToken = 0
+
 local function flickToMurderer()
     if not Config.Enabled then notify("Flick disabled", 1) return end
     local murderer = findMurderer()
@@ -273,7 +267,8 @@ local function flickToMurderer()
     local char = LocalPlayer.Character
     if not cam or not char then return end
     local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum then return end
     
     local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then return end
@@ -281,106 +276,110 @@ local function flickToMurderer()
     local targetPos = computeTargetPosition(targetPart)
     if not targetPos then return end
 
-    -- Wall check
     if Config.WallCheck and isWallBlocked(targetPos) then
         notify("Target behind wall", 1)
         return
     end
 
-    local startCF = cam.CFrame
-    local startOffset = startCF.Position - root.Position
-    
-    -- Токен для отмены старых фликов
-    getgenv().flickToken = (getgenv().flickToken or 0) + 1
-    local myToken = getgenv().flickToken
+    -- Сохраняем позицию камеры ОТНОСИТЕЛЬНО игрока
+    local startCamCFrame = cam.CFrame
+    local startOffset = startCamCFrame.Position - root.Position
+    local startLook = startCamCFrame.LookVector
 
-    local function doShoot()
-        if Config.AutoShoot then
-            fireOnce(targetPos)
+    flickToken = flickToken + 1
+    local myToken = flickToken
+
+    -- Отключаем авто-поворот на время флика (чтобы тело не дернулось)
+    local oldAutoRotate = hum.AutoRotate
+    hum.AutoRotate = false
+
+    -- Если нужно повернуть тело для сервера
+    if Config.RotateBody then
+        local flat = Vector3.new(targetPos.X, root.Position.Y, targetPos.Z)
+        local dir = flat - root.Position
+        if dir.Magnitude > 0.01 then
+            root.CFrame = CFrame.lookAt(root.Position, root.Position + dir.Unit)
         end
     end
 
-    -- 1. NATIVE MOUSE AIM (Работает идеально)
-    if Config.NativeMouseAim and mousemoverel then
-        local look = startCF.LookVector
-        local dir = (targetPos - startCF.Position).Unit
-        
-        local yawDiff = math.atan2(dir.X, -dir.Z) - math.atan2(look.X, -look.Z)
-        if yawDiff > math.pi then yawDiff = yawDiff - 2*math.pi elseif yawDiff < -math.pi then yawDiff = yawDiff + 2*math.pi end
-        local pitchDiff = math.asin(math.clamp(dir.Y, -1, 1)) - math.asin(math.clamp(look.Y, -1, 1))
-        
-        local sens = 0.003 -- Примерная сенса
-        mousemoverel(yawDiff / sens, -pitchDiff / sens)
-        
-        RunService.Heartbeat:Wait() -- Ждем кадр, чтобы камера применилась
-        doShoot()
-        
-        -- Плавный возврат мыши
-        if Config.ReturnCamera then
-            task.delay(Config.ReturnDelay / 1000, function()
-                if getgenv().flickToken ~= myToken then return end
-                local curCamCF = cam.CFrame
-                local curLook = curCamCF.LookVector
-                local returnDir = startCF.LookVector
-                
-                local rYaw = math.atan2(returnDir.X, -returnDir.Z) - math.atan2(curLook.X, -curLook.Z)
-                if rYaw > math.pi then rYaw = rYaw - 2*math.pi elseif rYaw < -math.pi then rYaw = rYaw + 2*math.pi end
-                local rPitch = math.asin(math.clamp(returnDir.Y, -1, 1)) - math.asin(math.clamp(curLook.Y, -1, 1))
-                
-                mousemoverel(rYaw / sens, -rPitch / sens)
-            end)
-        end
-        return
-    end
+    -- Главный трюк: привязываем камеру к RenderStep, чтобы она двигалась ВМЕСТЕ с игроком
+    cam.CameraType = Enum.CameraType.Scriptable
+    local bindName = "FlickCamOverride_" .. tostring(myToken)
+    
+    local isReturning = false
+    local returnStart = nil
+    local returnTarget = nil
+    local returnStartTime = 0
 
-    -- 2. RENDER STEPPED OVERRIDE (Fallback для мобилок)
-    local targetCF = CFrame.lookAt(startCF.Position, targetPos)
-    local currentCF = targetCF
-    local forceCam = true
-    
-    local bindName = "FlickCamOverride"
-    RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 1, function()
-        if forceCam then
-            cam.CFrame = currentCF
-        end
-    end)
-    
-    RunService.Heartbeat:Wait()
-    doShoot()
-    
-    task.delay(Config.ReturnDelay / 1000, function()
-        if getgenv().flickToken ~= myToken then
-            forceCam = false
-            pcall(function() RunService:UnbindFromRenderStep(bindName) end)
+    RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 1, function(dt)
+        if flickToken ~= myToken then
+            RunService:UnbindFromRenderStep(bindName)
             return
         end
         
-        local returnStart = currentCF
-        local curRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local returnTarget = startCF
-        if curRoot then
-            local newPos = curRoot.Position + startOffset
-            returnTarget = CFrame.lookAt(newPos, newPos + startCF.LookVector)
-        end
-        
-        local t0 = tick()
-        local dur = 0.15
-        while tick() - t0 < dur do
-            if getgenv().flickToken ~= myToken then break end
-            local a = (tick() - t0) / dur
-            currentCF = returnStart:Lerp(returnTarget, a)
-            task.wait()
-        end
-        
-        forceCam = false
-        pcall(function() RunService:UnbindFromRenderStep(bindName) end)
-        
-        -- Возвращаем камеру в дефолт
-        cam.CameraType = Enum.CameraType.Custom
-        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-            cam.CameraSubject = LocalPlayer.Character.Humanoid
+        local currentRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not currentRoot then return end
+
+        if not isReturning then
+            -- Фаза флика: камера смотрит на мёрдера, сохраняя дистанцию от игрока
+            local targetCamPos = currentRoot.Position + startOffset
+            local targetCF = CFrame.lookAt(targetCamPos, targetPos)
+            
+            if Config.InstantFlick then
+                cam.CFrame = targetCF
+            else
+                cam.CFrame = cam.CFrame:Lerp(targetCF, 0.3) -- Плавно
+            end
+        else
+            -- Фаза возврата: плавно возвращаем камеру на исходный LookVector
+            local t = (tick() - returnStartTime) / 0.15
+            if t >= 1 then
+                cam.CFrame = returnTarget
+                cam.CameraType = Enum.CameraType.Custom
+                cam.CameraSubject = hum
+                hum.AutoRotate = oldAutoRotate
+                RunService:UnbindFromRenderStep(bindName)
+                return
+            end
+            cam.CFrame = returnStart:Lerp(returnTarget, t)
         end
     end)
+
+    -- Ждем 1 кадр, чтобы камера применилась, и стреляем
+    RunService.Heartbeat:Wait()
+    if myToken ~= flickToken then return end
+    
+    if Config.AutoShoot then
+        fireOnce(targetPos)
+    end
+
+    -- Запускаем таймер возврата
+    if Config.ReturnCamera then
+        task.delay(Config.ReturnDelay / 1000, function()
+            if myToken ~= flickToken then return end
+            local currentRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if currentRoot then
+                returnStart = cam.CFrame
+                local targetCamPos = currentRoot.Position + startOffset
+                returnTarget = CFrame.lookAt(targetCamPos, targetCamPos + startLook)
+                returnStartTime = tick()
+                isReturning = true
+            else
+                cam.CameraType = Enum.CameraType.Custom
+                hum.AutoRotate = oldAutoRotate
+                RunService:UnbindFromRenderStep(bindName)
+            end
+        end)
+    else
+        -- Если авто-возврат выключен, просто отпускаем камеру
+        task.delay(0.1, function()
+            if myToken ~= flickToken then return end
+            cam.CameraType = Enum.CameraType.Custom
+            cam.CameraSubject = hum
+            hum.AutoRotate = oldAutoRotate
+            RunService:UnbindFromRenderStep(bindName)
+        end)
+    end
 end
 
 -- ========== KEYBIND ==========
@@ -440,7 +439,7 @@ local function createMainGUI()
     Title.Size = UDim2.new(1, 0, 0, 40)
     Title.Position = UDim2.new(0, 0, 0, 5)
     Title.BackgroundTransparency = 1
-    Title.Text = "⚡ FLICK 2.5.0"
+    Title.Text = "⚡ FLICK 2.6.0"
     Title.TextColor3 = Color3.fromRGB(255, 100, 100)
     Title.Font = Enum.Font.Jura
     Title.TextSize = 18
@@ -583,8 +582,8 @@ local function createMainGUI()
 
     addSection("CORE")
     addToggle("🔘 FLICK", function() return Config.Enabled end, function(v) Config.Enabled = v end)
+    addToggle("⚡ INSTANT FLICK", function() return Config.InstantFlick end, function(v) Config.InstantFlick = v end)
     addToggle("🔫 AUTO SHOOT", function() return Config.AutoShoot end, function(v) Config.AutoShoot = v end)
-    addToggle("🖱 NATIVE MOUSE AIM", function() return Config.NativeMouseAim end, function(v) Config.NativeMouseAim = v end)
     addToggle("🧱 WALL CHECK", function() return Config.WallCheck end, function(v) Config.WallCheck = v end)
 
     addSection("TARGET")
@@ -626,10 +625,15 @@ local function createMainGUI()
         if cam then
             cam.CameraType = Enum.CameraType.Custom
             local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-            if hum then cam.CameraSubject = hum end
+            if hum then 
+                cam.CameraSubject = hum
+                hum.AutoRotate = true
+            end
         end
-        getgenv().flickToken = (getgenv().flickToken or 0) + 1
-        pcall(function() RunService:UnbindFromRenderStep("FlickCamOverride") end)
+        flickToken = flickToken + 1
+        for i = 1, 10 do
+            pcall(function() RunService:UnbindFromRenderStep("FlickCamOverride_" .. tostring(flickToken - i)) end)
+        end
         notify("Camera reset", 2)
     end)
 
@@ -648,4 +652,4 @@ getgenv().flickToMurderer = flickToMurderer
 setupKeybind()
 pcall(createMainGUI)
 
-notify("⚡ FLICK 2.5.0 LOADED ⚡", 3)
+notify("⚡ FLICK 2.6.0 LOADED ⚡", 3)
