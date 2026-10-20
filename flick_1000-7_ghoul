@@ -1,10 +1,10 @@
 --[[
     Flick To Murderer - Autonomous
-    Version: 1.6.1 (Camera Position Freeze Fix)
+    Version: 1.7.0 (True 3rd Person Camera + Auto Unequip)
     Target: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
 
-local VERSION = "1.6.1"
+local VERSION = "1.7.0"
 
 -- ========== SERVICES ==========
 local Players = game:GetService("Players")
@@ -26,6 +26,7 @@ local Config = {
     InstantFlick = true,
     FlickSpeed = 100,
     AutoShoot = false,
+    AutoUnequip = true, -- НОВОЕ: снимать пушку после выстрела
     NotificationsEnabled = true,
     TargetPart = "HumanoidRootPart",
     ShowPredictVisual = false,
@@ -320,6 +321,19 @@ local function fireOnce(targetPos)
         if gun.Parent ~= char then pcall(function() hum:EquipTool(gun) end); task.wait(0.05) end
         pcall(function() gun:Activate() end)
         pcall(function() local vu = game:GetService("VirtualUser"); vu:Button1Down(Vector2.zero); vu:Button1Up(Vector2.zero) end)
+        
+        -- НОВОЕ: убираем пушку с руки после выстрела
+        if Config.AutoUnequip then
+            task.delay(0.1, function()
+                if gun and gun.Parent == char and hum then
+                    pcall(function() hum:UnequipTools() end)
+                    local bp = LocalPlayer:FindFirstChild("Backpack")
+                    if bp and gun.Parent == char then
+                        pcall(function() gun.Parent = bp end)
+                    end
+                end
+            end)
+        end
     end
 end
 
@@ -387,8 +401,21 @@ function flickToMurderer()
     if dir.Magnitude < 0.01 then return end
     local newHRPCFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + dir.Unit)
 
-    -- ФИКС: позиция камеры не меняется, только LookVector
-    local newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
+    -- ФИКС: истинное 3-е лицо (камера всегда за спиной)
+    local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
+    local isFirstPerson = (cam.CFrame.Position - headPos).Magnitude < 5
+    local newCamCFrame
+
+    if isFirstPerson then
+        newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
+    else
+        local camOffset = cam.CFrame.Position - rootPart.Position
+        local distance = Vector3.new(camOffset.X, 0, camOffset.Z).Magnitude
+        local height = camOffset.Y
+        local behindDir = -newHRPCFrame.LookVector
+        local newCamPos = rootPart.Position + Vector3.new(behindDir.X, 0, behindDir.Z).Unit * distance + Vector3.new(0, height, 0)
+        newCamCFrame = CFrame.lookAt(newCamPos, targetPos)
+    end
 
     flickLerpToken = flickLerpToken + 1
     local myFlickToken = flickLerpToken
@@ -573,6 +600,7 @@ local function createMainGUI()
     addSection("TARGET")
     addDropdown("TARGET PART", bodyParts, function() return Config.TargetPart end, function(v) Config.TargetPart = v end)
     addToggle("🔫 AUTO SHOOT", function() return Config.AutoShoot end, function(v) Config.AutoShoot = v end)
+    addToggle("🧹 AUTO UNEQUIP", function() return Config.AutoUnequip end, function(v) Config.AutoUnequip = v end)
     addToggle("👁 SHOW PREDICT VISUAL", function() return Config.ShowPredictVisual end, function(v) Config.ShowPredictVisual = v end)
 
     addSection("PREDICT")
