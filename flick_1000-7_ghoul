@@ -1,5 +1,5 @@
 --[[
-    Flick To Murderer - Autonomous (Gravity Predict Fix)
+    Flick To Murderer - Autonomous (Camera Orbit Fix + Config Fix)
     Updated for: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
 
@@ -31,7 +31,7 @@ local Config = {
     PredictOp = "Multiply",
     PredictXZ = 0.091,
     PredictY = 0.15,
-    GravityPredict = true,   -- НОВОЕ: баллистическая Y-формула
+    GravityPredict = true,
     VelocitySmooth = true,
 
     ServerSidePredict = true,
@@ -62,12 +62,6 @@ local function loadConfig()
     end)
 end
 loadConfig()
-
--- Migration: если старый конфиг имел PredictY < 0.05 (слишком мало для видимого эффекта), поднимем до 0.15
-if Config.PredictY and Config.PredictY < 0.05 then
-    Config.PredictY = 0.15
-    pcall(saveConfig)
-end
 
 -- ========== HELPERS ==========
 local function getSafeParent()
@@ -141,20 +135,18 @@ local function isAirborne(part)
         or state == Enum.HumanoidStateType.FallingDown
 end
 
--- ========== PREDICT (С ГРАВИТАЦИЕЙ) ==========
+-- ========== PREDICT ==========
 local function computeTargetPosition(part)
     if not part then return nil end
     local vel = getIntentVelocity(part)
     if not vel then return part.Position end
 
-    -- Server-side lag: БЕЗ обнуления Y
     local serverOffset = Vector3.zero
     if Config.ServerSidePredict then
         local ping = getPing()
         serverOffset = vel * (ping * 0.5)
     end
 
-    -- Predict offset
     local predictOffset = Vector3.zero
     if Config.PredictEnabled then
         local multXZ = Config.PredictXZ
@@ -169,18 +161,15 @@ local function computeTargetPosition(part)
         local predY
 
         if Config.GravityPredict and isAirborne(part) then
-            -- Баллистика: y(t) = y0 + v0*t - 0.5*g*t^2
             local t = multY
             predY = vel.Y * t - 0.5 * GRAVITY * t * t
         else
-            -- Линейно (на земле Y-скорость ~0, формула просто даёт 0)
             predY = vel.Y * multY
         end
 
         predictOffset = Vector3.new(predX, predY, predZ)
     end
 
-    -- Legacy ping comp: БЕЗ обнуления Y
     local legacyPing = Vector3.zero
     if Config.PingComp then
         local ping = getPing()
@@ -374,12 +363,17 @@ function flickToMurderer()
     if isFirstPerson then
         newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
     else
+        -- ИСПРАВЛЕННЫЙ РАСЧЕТ ДЛЯ 3 ЛИЦА (Орбитальное вращение без смены дистанции)
         local offset = cam.CFrame.Position - rootPart.Position
         local flatOffset = Vector3.new(offset.X, 0, offset.Z)
         local flatTargetDir = Vector3.new(targetPos.X - rootPart.Position.X, 0, targetPos.Z - rootPart.Position.Z)
 
         if flatOffset.Magnitude > 0.1 and flatTargetDir.Magnitude > 0.1 then
-            local angle = math.atan2(flatTargetDir.X, flatTargetDir.Z) - math.atan2(flatOffset.X, flatOffset.Z)
+            -- Вычисляем угол так, чтобы камера встала СЗАДИ персонажа (напротив цели)
+            local targetAngle = math.atan2(-flatTargetDir.X, -flatTargetDir.Z)
+            local currentAngle = math.atan2(flatOffset.X, flatOffset.Z)
+            local angle = targetAngle - currentAngle
+            
             local rotatedOffset = CFrame.Angles(0, angle, 0) * offset
             newCamCFrame = CFrame.lookAt(rootPart.Position + rotatedOffset, targetPos)
         else
@@ -472,7 +466,7 @@ local function createMainGUI()
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
 
     local Title = Instance.new("TextLabel", MainFrame); Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5)
-    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK (GRAVITY FIX)"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
+    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK (ORBIT FIX)"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
     DragSystem.MakeDraggable(MainFrame, Title)
 
     local Container = Instance.new("ScrollingFrame", MainFrame); Container.Size = UDim2.new(1, -20, 1, -50); Container.Position = UDim2.new(0, 10, 0, 45)
@@ -555,8 +549,9 @@ local function createMainGUI()
     local opBtn = addButton("⚙ PREDICT OP: " .. Config.PredictOp, function()
         Config.PredictOp = Config.PredictOp == "Multiply" and "Divide" or "Multiply"; opBtn.Text = "⚙ PREDICT OP: " .. Config.PredictOp; saveConfig(); notify("Predict Op: " .. Config.PredictOp, 1)
     end)
+    -- Изменен минимум на 0.001, чтобы 0.011 не срезалось
     addSlider("PREDICT X/Z (SEC)", 0.001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true)
-    addSlider("PREDICT Y (SEC)", 0.01, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
+    addSlider("PREDICT Y (SEC)", 0.001, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
 
     addSection("ACCURACY LAYERS")
     addToggle("🕒 REPLICATION SYNC", function() return Config.ReplicationSync end, function(v) Config.ReplicationSync = v end)
@@ -602,5 +597,5 @@ getgenv().flickToMurderer = flickToMurderer
 setupKeybind()
 createMainGUI()
 
-notify("⚡ FLICK (GRAVITY FIX) LOADED ⚡", 3)
-print("Flick To Murderer loaded - Gravity Predict Enabled")
+notify("⚡ FLICK (ORBIT FIX) LOADED ⚡", 3)
+print("Flick To Murderer loaded - Orbit Fix & Config Fix")
