@@ -1,33 +1,53 @@
 --[[
-    Flick To Murderer — MM2 (PlaceId 142823291)
-    Часть 1 / 2 — foundation + core flick logic.
-    Часть 2 (по команде "дальше"): тёмная GUI, привязка бинда, кнопки, bootstrap.
-
-    Что переписано относительно старого скрипта:
-      • Камера НЕ трогается. Ни CameraType, ни cam.CFrame. cameraCFrame для
-        выстрела считается в памяти и уходит в серверный ремоут. Шифтлок,
-        курсор и нативный контроллер камеры остаются целыми.
-      • Поиск мёрдера ВЫНЕСЕН из хотпаса. Фоновый цикл раз в CacheInterval
-        дёргает GetPlayerData и кладёт мёрдера в переменную. Обработчик
-        бинда читает готовое — ни одного InvokeServer на нажатие.
-      • Тело фликается через HumanoidRootPart.CFrame с AutoRotate = false
-        ровно на кадр выстрела, потом восстанавливается предыдущее значение.
-      • Предикт: velocity * (XZ / Y multiplier), плюс опционально velocity * ping/2.
-        Hitscan => время полёта = 0, единственная реальная задержка — пинг.
+    ╔══════════════════════════════════════════════════════════════╗
+    ║  Flick To Murderer — MM2 (PlaceId 142823291)                 ║
+    ║  SCRIPT VERSION: 2.0.0                                       ║
+    ║  CONFIG VERSION: 2                                           ║
+    ║  Часть 1 / 2 — Ядро (кэш, предикт, выстрел, wall check)      ║
+    ║                                                              ║
+    ║  ИСПРАВЛЕНИЯ (по код-ревью):                                 ║
+    ║   [1] Фоновый кэш мёрдера — без sync InvokeServer на бинд    ║
+    ║   [2] Rate-limit 0.15s между фликами                         ║
+    ║   [3] Shoot через pcall: (pos, camCF) → fallback (pos)       ║
+    ║   [4] Рекурсивный поиск RemoteEvent с "shoot" в имени        ║
+    ║   [5] AutoRotate восстанавливается в pcall на всех путях     ║
+    ║   [6] Wall check — Raycast от головы до таргета              ║
+    ║   [7] (Часть 2) drag vs click по дистанции 5px               ║
+    ║   [8] visualBodyFlick обёрнут в pcall                        ║
+    ║                                                              ║
+    ║  СЕКЦИИ:                                                     ║
+    ║   V2-SERVICES  · сервисы                                     ║
+    ║   V2-CONFIG    · конфиг + save/load                          ║
+    ║   V2-HELPERS   · safeParent, notify                          ║
+    ║   V2-PREDICT   · ping, velocity smoothing, prediction        ║
+    ║   V2-CACHE     · фоновый поиск мёрдера                       ║
+    ║   V2-GUN       · экип / анэкип / поиск ствола                ║
+    ║   V2-REMOTE    · рекурсивный поиск Shoot RemoteEvent         ║
+    ║   V2-WALL      · Raycast LOS-проверка                        ║
+    ║   V2-FLICK     · визуальный флик + выстрел                   ║
+    ║   V2-KEYBIND   · бинд                                        ║
+    ║   V2-EXPORT    · таблица для Части 2                         ║
+    ╚══════════════════════════════════════════════════════════════╝
 ]]
 
-local Players       = game:GetService("Players")
-local UIS           = game:GetService("UserInputService")
-local RS            = game:GetService("ReplicatedStorage")
-local Stats         = game:GetService("Stats")
-local CoreGui       = game:GetService("CoreGui")
-local RunService    = game:GetService("RunService")
-local HttpService   = game:GetService("HttpService")
+-- ===================== V2-SERVICES =====================
+local Players     = game:GetService("Players")
+local UIS         = game:GetService("UserInputService")
+local RS          = game:GetService("ReplicatedStorage")
+local Stats       = game:GetService("Stats")
+local CoreGui     = game:GetService("CoreGui")
+local RunService  = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 
 local LP = Players.LocalPlayer
 
--- =================== CONFIG ===================
+-- ===================== V2-CONFIG =====================
+local CONFIG_VERSION = 2
+
 local Config = {
+    ConfigVersion  = CONFIG_VERSION,
+    ScriptVersion  = "2.0.0",
+
     Enabled        = true,
     InstantFlick   = true,
     FlickSpeed     = 120,
@@ -44,10 +64,13 @@ local Config = {
     VelocitySmooth = true,
 
     CacheInterval  = 1.0,
+    FlickCooldown  = 0.15,   -- [2] rate-limit, сек
+    WallCheck      = true,   -- [6]
+
     Notifications  = true,
 }
 
-local CONFIG_FILE = "flick_mm2_config.json"
+local CONFIG_FILE = "flick_mm2_config_v2.json"
 
 local function saveConfig()
     pcall(function()
@@ -60,16 +83,20 @@ end
 local function loadConfig()
     pcall(function()
         if readfile and isfile and isfile(CONFIG_FILE) then
-            local data = HttpService:JSONDecode(readfile(CONFIG_FILE))
-            for k, v in pairs(data) do
-                if Config[k] ~= nil then Config[k] = v end
+            local raw = HttpService:JSONDecode(readfile(CONFIG_FILE))
+            if type(raw) == "table" then
+                for k, v in pairs(raw) do
+                    if Config[k] ~= nil then Config[k] = v end
+                end
             end
+            -- миграция: сохраняем текущую версию
+            Config.ConfigVersion = CONFIG_VERSION
         end
     end)
 end
 loadConfig()
 
--- =================== UI HELPERS ===================
+-- ===================== V2-HELPERS =====================
 local function safeParent()
     local p = gethui and gethui()
     if p and typeof(p) == "Instance" then return p end
@@ -81,16 +108,16 @@ local function notify(text, dur)
     if not Config.Notifications then return end
     pcall(function()
         local parent = safeParent()
-        local sg = parent:FindFirstChild("FlickNotifyMM2")
+        local sg = parent:FindFirstChild("FlickNotifyV2")
         if not sg then
             sg = Instance.new("ScreenGui")
-            sg.Name = "FlickNotifyMM2"
+            sg.Name = "FlickNotifyV2"
             sg.ResetOnSpawn = false
             sg.IgnoreGuiInset = true
             sg.Parent = parent
         end
         local f = Instance.new("Frame")
-        f.Size = UDim2.new(0, 280, 0, 36)
+        f.Size = UDim2.new(0, 280, 0, 34)
         f.Position = UDim2.new(0.5, -140, 0.78, 0)
         f.BackgroundColor3 = Color3.fromRGB(22, 22, 26)
         f.BackgroundTransparency = 0.1
@@ -110,7 +137,7 @@ local function notify(text, dur)
     end)
 end
 
--- =================== PING + VELOCITY + PREDICT ===================
+-- ===================== V2-PREDICT =====================
 local function getPingSeconds()
     local ok, v = pcall(function()
         return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
@@ -126,7 +153,7 @@ local function smoothedVelocity(part)
     local now = os.clock()
     local c = velCache[key]
     if not c then c = {}; velCache[key] = c end
-    table.insert(c, {v = raw, t = now})
+    table.insert(c, { v = raw, t = now })
     while #c > 0 and now - c[1].t > 0.1 do table.remove(c, 1) end
     local sum = Vector3.zero
     for _, e in ipairs(c) do sum = sum + e.v end
@@ -137,21 +164,29 @@ local function predictedPosition(part)
     if not Config.PredictEnabled then return part.Position end
     local vel = smoothedVelocity(part)
     if vel.Magnitude < 0.05 then return part.Position end
-    local offset = Vector3.new(vel.X * Config.PredictXZ, vel.Y * Config.PredictY, vel.Z * Config.PredictXZ)
+    local offset = Vector3.new(
+        vel.X * Config.PredictXZ,
+        vel.Y * Config.PredictY,
+        vel.Z * Config.PredictXZ
+    )
     if Config.PingComp then
         offset = offset + vel * (getPingSeconds() * 0.5)
     end
     return part.Position + offset
 end
 
--- =================== MURDERER BACKGROUND CACHE ===================
+-- ===================== V2-CACHE =====================
 local murdererCache = nil
+local cacheTicks = 0
 
+-- [1] Синхронный поиск — вызывается ТОЛЬКО из фонового цикла
 local function findMurdererOnce()
     if game.PlaceId == 142823291 then
         local ok, data = pcall(function()
             local rf = RS:FindFirstChild("GetPlayerData", true)
-            if rf and rf:IsA("RemoteFunction") then return rf:InvokeServer() end
+            if rf and rf:IsA("RemoteFunction") then
+                return rf:InvokeServer()
+            end
         end)
         if ok and type(data) == "table" then
             for name, info in pairs(data) do
@@ -168,7 +203,7 @@ local function findMurdererOnce()
         end
         return nil
     end
-    -- Fallback: knife-holder detection (для форков с подменённым PlaceId)
+    -- Fallback: детект ножа в инвентаре
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LP and p.Character then
             local hum = p.Character:FindFirstChildOfClass("Humanoid")
@@ -185,19 +220,20 @@ local function findMurdererOnce()
 end
 
 local function startCacheLoop()
-    if getgenv()._flickCacheRunning then return end
-    getgenv()._flickCacheRunning = true
+    if getgenv()._flickV2CacheRunning then return end
+    getgenv()._flickV2CacheRunning = true
     task.spawn(function()
-        while getgenv()._flickCacheRunning do
+        while getgenv()._flickV2CacheRunning do
             local ok, res = pcall(findMurdererOnce)
             murdererCache = ok and res or nil
+            cacheTicks = cacheTicks + 1
             task.wait(Config.CacheInterval)
         end
     end)
 end
 
--- =================== GUN LAYER ===================
-local function findGunInCharacter()
+-- ===================== V2-GUN =====================
+local function findGunEquipped()
     local char = LP.Character
     if not char then return nil end
     for _, c in ipairs(char:GetChildren()) do
@@ -207,8 +243,8 @@ local function findGunInCharacter()
 end
 
 local function findGunAnywhere()
-    local equipped = findGunInCharacter()
-    if equipped then return equipped end
+    local eq = findGunEquipped()
+    if eq then return eq end
     local bp = LP:FindFirstChild("Backpack")
     if bp then
         local g = bp:FindFirstChild("Gun")
@@ -218,7 +254,7 @@ local function findGunAnywhere()
 end
 
 local function equipGunIfNeeded()
-    if findGunInCharacter() then return true end
+    if findGunEquipped() then return true end
     local char = LP.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hum then return false end
@@ -227,36 +263,95 @@ local function equipGunIfNeeded()
     if not (g and g:IsA("Tool")) then return false end
     pcall(function() hum:EquipTool(g) end)
     task.wait(0.08)
-    return findGunInCharacter() ~= nil
+    return findGunEquipped() ~= nil
 end
 
 local function unequipGun()
-    local gun = findGunInCharacter()
+    local gun = findGunEquipped()
     if not gun then return end
     local bp = LP:FindFirstChild("Backpack")
     if bp then pcall(function() gun.Parent = bp end) end
 end
 
--- =================== SHOOT REMOTE ===================
-local function findShootRemote()
+-- ===================== V2-REMOTE =====================
+-- [4] Ищем либо по стандартному пути, либо рекурсивно по имени "shoot"
+local shootRemote = nil
+
+local function resolveShootRemote()
+    if shootRemote and shootRemote.Parent then return shootRemote end
+
     local remotes = RS:FindFirstChild("Remotes")
-    if not remotes then return nil end
-    local gunFolder = remotes:FindFirstChild("Gun")
-    if not gunFolder then return nil end
-    local shoot = gunFolder:FindFirstChild("Shoot")
-    if shoot and shoot:IsA("RemoteEvent") then return shoot end
+    if remotes then
+        local gun = remotes:FindFirstChild("Gun")
+        if gun then
+            local s = gun:FindFirstChild("Shoot")
+            if s and s:IsA("RemoteEvent") then
+                shootRemote = s
+                return s
+            end
+        end
+    end
+
+    local ok, result = pcall(function()
+        for _, d in ipairs(RS:GetDescendants()) do
+            if d:IsA("RemoteEvent") and string.find(string.lower(d.Name), "shoot") then
+                return d
+            end
+        end
+    end)
+    if ok and result then
+        shootRemote = result
+        return result
+    end
+
     return nil
 end
 
--- =================== FLICK CORE ===================
-local firing = false
+-- [3] Двойной pcall: сначала (pos, camCF), затем (pos)
+local function fireShoot(remote, targetPos, camCF)
+    if not remote then return false, "no_remote" end
 
-local function computeCameraCFrame(targetPos)
-    local cam = workspace.CurrentCamera
-    if not cam then return nil end
-    return CFrame.lookAt(cam.CFrame.Position, targetPos)
+    local ok1 = pcall(function()
+        remote:FireServer(targetPos, camCF)
+    end)
+    if ok1 then return true, "pos+camCF" end
+
+    local ok2 = pcall(function()
+        remote:FireServer(targetPos)
+    end)
+    if ok2 then return true, "pos" end
+
+    return false, "fire_failed"
 end
 
+-- ===================== V2-WALL =====================
+-- [6] Raycast от головы до таргета. Если что-то (кроме своей/целевой модели) на пути — стена
+local function hasLineOfSight(targetPos)
+    local char = LP.Character
+    if not char then return false end
+    local origin = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    if not origin then return false end
+
+    local filter = { char }
+    if murdererCache and murdererCache.Character then
+        table.insert(filter, murdererCache.Character)
+    end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = filter
+    params.IgnoreWater = true
+
+    local dir = targetPos - origin.Position
+    local hit = workspace:Raycast(origin.Position, dir, params)
+    return hit == nil
+end
+
+-- ===================== V2-FLICK =====================
+local firing = false
+local lastFlickAt = 0   -- [2]
+
+-- [5][8] AutoRotate восстанавливается в pcall на любом пути, тело крутится в pcall
 local function visualBodyFlick(targetPos, instant)
     local char = LP.Character
     if not char then return end
@@ -264,28 +359,40 @@ local function visualBodyFlick(targetPos, instant)
     local root = char:FindFirstChild("HumanoidRootPart")
     if not hum or not root then return end
 
-    local flatTarget = Vector3.new(targetPos.X, root.Position.Y, targetPos.Z)
-    if (flatTarget - root.Position).Magnitude < 0.5 then return end
-
-    local origCFrame   = root.CFrame
-    local targetCFrame = CFrame.lookAt(root.Position, flatTarget)
     local wasAuto = hum.AutoRotate
-    hum.AutoRotate = false
 
-    if instant then
-        root.CFrame = targetCFrame
-        RunService.Heartbeat:Wait()
-    else
-        local angle = math.acos(math.clamp(origCFrame.LookVector:Dot(targetCFrame.LookVector), -1, 1))
-        local totalTime = math.clamp(angle / (math.max(Config.FlickSpeed, 1) * 2), 0.02, 0.4)
-        local steps = math.clamp(math.floor(totalTime * 60), 4, 30)
-        for i = 1, steps do
-            root.CFrame = origCFrame:Lerp(targetCFrame, i / steps)
-            RunService.RenderStepped:Wait()
+    pcall(function()
+        hum.AutoRotate = false
+
+        local flatTarget = Vector3.new(targetPos.X, root.Position.Y, targetPos.Z)
+        if (flatTarget - root.Position).Magnitude < 0.5 then return end
+
+        local targetCFrame = CFrame.lookAt(root.Position, flatTarget)
+
+        if instant then
+            root.CFrame = targetCFrame
+            RunService.Heartbeat:Wait()
+        else
+            local origCFrame = root.CFrame
+            local angle = math.acos(math.clamp(
+                origCFrame.LookVector:Dot(targetCFrame.LookVector), -1, 1))
+            local totalTime = math.clamp(
+                angle / (math.max(Config.FlickSpeed, 1) * 2), 0.02, 0.4)
+            local steps = math.clamp(math.floor(totalTime * 60), 4, 30)
+            for i = 1, steps do
+                root.CFrame = origCFrame:Lerp(targetCFrame, i / steps)
+                RunService.RenderStepped:Wait()
+            end
         end
-    end
+    end)
 
-    hum.AutoRotate = wasAuto
+    pcall(function() hum.AutoRotate = wasAuto end)
+end
+
+local function computeCameraCFrame(targetPos)
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+    return CFrame.lookAt(cam.CFrame.Position, targetPos)
 end
 
 local function flick()
@@ -293,30 +400,41 @@ local function flick()
         notify("Flick disabled.", 1)
         return
     end
+
+    -- [2] rate-limit
+    local now = os.clock()
+    if now - lastFlickAt < Config.FlickCooldown then return end
+    lastFlickAt = now
+
     if firing then return end
     firing = true
 
+    -- [1] Никакого InvokeServer здесь — только чтение кэша
     local murderer = murdererCache
-    if not murderer or not murderer.Parent then
-        murderer = findMurdererOnce()
-        murdererCache = murderer
-    end
-    if not murderer or not murderer.Character then
-        notify("No murderer cached.", 1)
+    if not murderer or not murderer.Parent or not murderer.Character then
+        notify("No cached murderer", 1)
         firing = false
         return
     end
 
-    local targetRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
-    local targetHum  = murderer.Character:FindFirstChildOfClass("Humanoid")
-    if not targetRoot or not targetHum or targetHum.Health <= 0 then
+    local tRoot = murderer.Character:FindFirstChild("HumanoidRootPart")
+    local tHum  = murderer.Character:FindFirstChildOfClass("Humanoid")
+    if not tRoot or not tHum or tHum.Health <= 0 then
         notify("Murderer unavailable.", 1)
         firing = false
         return
     end
 
-    local targetPos = predictedPosition(targetRoot)
-    local camCF     = computeCameraCFrame(targetPos)
+    local targetPos = predictedPosition(tRoot)
+
+    -- [6] wall check
+    if Config.WallCheck and not hasLineOfSight(targetPos) then
+        notify("Wall between you and target.", 1)
+        firing = false
+        return
+    end
+
+    local camCF = computeCameraCFrame(targetPos)
     if not camCF then firing = false; return end
 
     if Config.AutoShoot then
@@ -330,23 +448,29 @@ local function flick()
             firing = false
             return
         end
-        local remote = findShootRemote()
+
+        local remote = resolveShootRemote()
         if not remote then
             notify("Shoot remote not found.", 1)
             firing = false
             return
         end
-        pcall(function() remote:FireServer(targetPos, camCF) end)
+
+        local sent = fireShoot(remote, targetPos, camCF)
+        if not sent then
+            -- no-op: server rejected/errored, не спамим
+        end
+
         if Config.AutoUnequip then unequipGun() end
     end
 
     task.spawn(function()
-        pcall(visualBodyFlick, targetPos, Config.InstantFlick)
+        visualBodyFlick(targetPos, Config.InstantFlick)
         firing = false
     end)
 end
 
--- =================== KEYBIND ===================
+-- ===================== V2-KEYBIND =====================
 local waitingForBind = false
 local keyConn = nil
 
@@ -380,91 +504,366 @@ local function startBind()
     end)
 end
 
--- =================== STATE EXPORT (для Части 2) ===================
-getgenv()._flick = {
-    Config     = Config,
-    Flick      = flick,
-    StartBind  = startBind,
-    Notify     = notify,
-    Save       = saveConfig,
-    SafeParent = safeParent,
+-- ===================== V2-EXPORT =====================
+-- Часть 2 (GUI) читает эту таблицу. Один и тот же Config — правки видны сразу.
+getgenv()._flickV2 = {
+    Config        = Config,
+    Flick         = flick,
+    StartBind     = startBind,
+    Notify        = notify,
+    Save          = saveConfig,
+    SafeParent    = safeParent,
+    GetCache      = function() return murdererCache, cacheTicks end,
+    Version       = { script = "2.0.0", config = CONFIG_VERSION },
 }
 
--- =================== BOOTSTRAP ===================
+-- ===================== BOOTSTRAP =====================
 startCacheLoop()
 setupKeybind()
 
-notify("Flick MM2 ready. " .. Config.Keybind .. " to flick.", 2)
-print("[FlickMM2] Часть 1 загружена. Ядро готово — нажми " .. Config.Keybind .. " для флика. Скажи 'дальше' для Части 2 (GUI).")
+notify("Flick MM2 v2 ready. " .. Config.Keybind .. " = flick.", 2)
+print(("[FlickV2] Часть 1 OK · script=%s · config=%d · key=%s")
+    :format(Config.ScriptVersion, Config.ConfigVersion, Config.Keybind))
+print("[FlickV2] Ядро загружено. Скажи 'дальше' для Части 2 (GUI).")
 --[[
-    Часть 2 / 2 — тёмная GUI + финализация.
-    Требует загруженной Части 1 (getgenv()._flick).
-    Стиль: тёмный фон, акцент #FF6464, шрифт Gotham, draggable, круглая
-    кнопка-иконка в углу. Все элементы читают/пишут Config напрямую —
-    изменения мгновенно влияют на ядро (общая таблица).
+    ╔══════════════════════════════════════════════════════════════╗
+    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 2.0.0             ║
+    ║  Часть 2 / 2 — GUI (тёмная тема, drag-vs-click, controls)     ║
+    ║                                                              ║
+    ║  Требует загруженной Части 1 (getgenv()._flickV2).           ║
+    ║                                                              ║
+    ║  [7] Drag vs Click: круглую ⚡-кнопку можно тащить — если     ║
+    ║      курсор сместился > 5px между down и up, это драг,        ║
+    ║      меню НЕ открывается. Меньше 5px — клик.                 ║
+    ║                                                              ║
+    ║  СЕКЦИИ:                                                     ║
+    ║   G2-DRAG      · draggable (с порогом для клика)             ║
+    ║   G2-THEME     · палитра                                     ║
+    ║   G2-WIDGETS   · section/toggle/slider/button                ║
+    ║   G2-BUILD     · сборка главного окна                        ║
+    ║   G2-BOOT      · финализация                                 ║
+    ╚══════════════════════════════════════════════════════════════╝
 ]]
 
-local _flick = getgenv()._flick
-if not _flick then
-    error("[FlickMM2] Часть 1 не загружена. Сначала запусти её.")
+local V2 = getgenv()._flickV2
+if not V2 then
+    error("[FlickV2] Часть 1 не загружена. Сначала выполни её.")
 end
 
-local Config     = _flick.Config
-local Notify     = _flick.Notify
-local Save       = _flick.Save
-local SafeParent = _flick.SafeParent
-local StartBind  = _flick.StartBind
+local Config     = V2.Config
+local Notify     = V2.Notify
+local Save       = V2.Save
+local SafeParent = V2.SafeParent
+local StartBind  = V2.StartBind
+local GetCache   = V2.GetCache
 
-local UIS = game:GetService("UserInputService")
+local UIS        = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 
--- =================== DRAG ===================
-local function makeDraggable(gui, handle)
-    local dragging, dragStart, startPos = false, nil, nil
+-- ===================== G2-THEME =====================
+local Theme = {
+    bg          = Color3.fromRGB(18, 18, 22),
+    panel       = Color3.fromRGB(24, 24, 30),
+    row         = Color3.fromRGB(30, 30, 38),
+    rowHover    = Color3.fromRGB(38, 38, 46),
+    text        = Color3.fromRGB(232, 232, 238),
+    textDim     = Color3.fromRGB(150, 150, 160),
+    accent      = Color3.fromRGB(255, 100, 100),
+    accentSoft  = Color3.fromRGB(255, 150, 150),
+    toggleOn    = Color3.fromRGB(90, 170, 115),
+    toggleOff   = Color3.fromRGB(50, 50, 60),
+    sliderBg    = Color3.fromRGB(50, 50, 60),
+    boxBg       = Color3.fromRGB(20, 20, 26),
+    stroke      = Color3.fromRGB(45, 45, 55),
+    danger      = Color3.fromRGB(180, 70, 70),
+    warn        = Color3.fromRGB(150, 130, 60),
+}
+
+-- ===================== G2-DRAG =====================
+-- Возвращает функцию, которая отдаёт состояние (isDrag, draggedDistance).
+-- Порог клика настраивается (по умолчанию 5px — [7]).
+local function makeDraggable(gui, handle, clickThreshold)
+    clickThreshold = clickThreshold or 5
+    local dragging   = false
+    local dragStart  = nil
+    local startPos   = nil
+    local movedDist  = 0
+
     handle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
         or input.UserInputType == Enum.UserInputType.Touch then
             dragging  = true
             dragStart = input.Position
             startPos  = gui.Position
+            movedDist = 0
         end
     end)
+
     handle.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
         or input.UserInputType == Enum.UserInputType.Touch then
             dragging = false
         end
     end)
+
     UIS.InputChanged:Connect(function(input)
         if not dragging then return end
         if input.UserInputType ~= Enum.UserInputType.MouseMovement
         and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
         local delta = input.Position - dragStart
+        movedDist = math.max(movedDist, math.sqrt(delta.X * delta.X + delta.Y * delta.Y))
+
         gui.Position = UDim2.new(
             startPos.X.Scale, startPos.X.Offset + delta.X,
             startPos.Y.Scale, startPos.Y.Offset + delta.Y
         )
     end)
+
+    return function()
+        return movedDist, movedDist > clickThreshold
+    end
 end
 
--- =================== BUILD ===================
-local function buildGUI()
+-- ===================== G2-WIDGETS =====================
+local W = {}
+
+function W.section(scroll, text)
+    local s = Instance.new("TextLabel")
+    s.Size = UDim2.new(1, 0, 0, 22)
+    s.BackgroundTransparency = 1
+    s.Text = "── " .. text .. " ──"
+    s.TextColor3 = Theme.accentSoft
+    s.Font = Enum.Font.GothamMedium
+    s.TextSize = 11
+    s.TextXAlignment = Enum.TextXAlignment.Left
+    s.Parent = scroll
+    return s
+end
+
+function W.toggle(scroll, label, key, opts)
+    opts = opts or {}
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 34)
+    row.BackgroundColor3 = Theme.row
+    row.BorderSizePixel = 0
+    row.AutoButtonColor = false
+    row.Text = ""
+    row.Parent = scroll
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+
+    local name = Instance.new("TextLabel")
+    name.Size = UDim2.new(1, -70, 1, 0)
+    name.Position = UDim2.new(0, 12, 0, 0)
+    name.BackgroundTransparency = 1
+    name.Text = label
+    name.TextColor3 = Theme.text
+    name.Font = Enum.Font.Gotham
+    name.TextSize = 12
+    name.TextXAlignment = Enum.TextXAlignment.Left
+    name.Parent = row
+
+    local pill = Instance.new("Frame")
+    pill.Size = UDim2.new(0, 40, 0, 20)
+    pill.Position = UDim2.new(1, -52, 0.5, -10)
+    pill.BackgroundColor3 = Theme.toggleOff
+    pill.BorderSizePixel = 0
+    pill.Parent = row
+    Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = UDim2.new(0, 2, 0.5, -8)
+    knob.BackgroundColor3 = Color3.fromRGB(180, 180, 190)
+    knob.BorderSizePixel = 0
+    knob.Parent = pill
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local function render()
+        local v = Config[key]
+        pill.BackgroundColor3 = v and Theme.toggleOn or Theme.toggleOff
+        knob.Position = v
+            and UDim2.new(1, -18, 0.5, -8)
+            or  UDim2.new(0, 2, 0.5, -8)
+        knob.BackgroundColor3 = v and Color3.fromRGB(240, 240, 245)
+            or Color3.fromRGB(150, 150, 160)
+    end
+    render()
+
+    row.MouseEnter:Connect(function()
+        row.BackgroundColor3 = Theme.rowHover
+    end)
+    row.MouseLeave:Connect(function()
+        row.BackgroundColor3 = Theme.row
+    end)
+
+    row.MouseButton1Click:Connect(function()
+        Config[key] = not Config[key]
+        render()
+        Save()
+        if opts.onChange then pcall(opts.onChange, Config[key]) end
+    end)
+
+    return row
+end
+
+function W.slider(scroll, label, key, minV, maxV, isFloat, step)
+    step = step or (isFloat and 0.001 or 1)
+
+    local wrap = Instance.new("Frame")
+    wrap.Size = UDim2.new(1, 0, 0, 52)
+    wrap.BackgroundColor3 = Theme.row
+    wrap.BorderSizePixel = 0
+    wrap.Parent = scroll
+    Instance.new("UICorner", wrap).CornerRadius = UDim.new(0, 7)
+
+    local name = Instance.new("TextLabel")
+    name.Size = UDim2.new(1, -70, 0, 22)
+    name.Position = UDim2.new(0, 12, 0, 4)
+    name.BackgroundTransparency = 1
+    name.TextColor3 = Theme.text
+    name.Font = Enum.Font.Gotham
+    name.TextSize = 12
+    name.TextXAlignment = Enum.TextXAlignment.Left
+    name.Parent = wrap
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0, 56, 0, 22)
+    box.Position = UDim2.new(1, -68, 0, 4)
+    box.BackgroundColor3 = Theme.boxBg
+    box.BorderSizePixel = 0
+    box.TextColor3 = Theme.text
+    box.Font = Enum.Font.Gotham
+    box.TextSize = 12
+    box.ClearTextOnFocus = false
+    box.Parent = wrap
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 5)
+
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.new(1, -24, 0, 6)
+    bg.Position = UDim2.new(0, 12, 1, -14)
+    bg.BackgroundColor3 = Theme.sliderBg
+    bg.BorderSizePixel = 0
+    bg.Parent = wrap
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = Theme.accent
+    fill.BorderSizePixel = 0
+    fill.Parent = bg
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+    local function fmt(v)
+        if isFloat then
+            return (string.format("%.3f", v):gsub("0+$", ""):gsub("%.$", ""))
+        end
+        return tostring(math.floor(v))
+    end
+
+    local function render()
+        local v = Config[key]
+        local alpha = math.clamp((v - minV) / (maxV - minV), 0, 1)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        name.Text = label
+        box.Text = fmt(v)
+    end
+    render()
+
+    local dragging = false
+    local function setFromInput(input)
+        local absX, absW = bg.AbsolutePosition.X, bg.AbsoluteSize.X
+        if absW <= 0 then return end
+        local rel = math.clamp((input.Position.X - absX) / absW, 0, 1)
+        local raw = minV + rel * (maxV - minV)
+        local snapped = math.floor(raw / step + 0.5) * step
+        Config[key] = math.clamp(snapped, minV, maxV)
+        render()
+    end
+
+    bg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            setFromInput(input)
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            setFromInput(input)
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then
+                dragging = false
+                Save()
+            end
+        end
+    end)
+
+    box.FocusLost:Connect(function()
+        local n = tonumber(box.Text)
+        if n then
+            n = math.clamp(n, minV, maxV)
+            Config[key] = math.floor(n / step + 0.5) * step
+            Save()
+        end
+        render()
+    end)
+
+    return wrap
+end
+
+function W.button(scroll, label, onClick, color)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 32)
+    btn.BackgroundColor3 = color or Color3.fromRGB(40, 40, 50)
+    btn.BorderSizePixel = 0
+    btn.AutoButtonColor = false
+    btn.Text = label
+    btn.TextColor3 = Theme.text
+    btn.Font = Enum.Font.GothamMedium
+    btn.TextSize = 12
+    btn.Parent = scroll
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+
+    btn.MouseEnter:Connect(function()
+        btn.BackgroundColor3 = btn.BackgroundColor3:Lerp(Color3.new(1, 1, 1), 0.06)
+    end)
+    btn.MouseLeave:Connect(function()
+        btn.BackgroundColor3 = color or Color3.fromRGB(40, 40, 50)
+    end)
+    btn.MouseButton1Click:Connect(onClick)
+    return btn
+end
+
+-- ===================== G2-BUILD =====================
+local builtGui = nil
+
+local function build()
     local parent = SafeParent()
 
-    local old = parent:FindFirstChild("FlickMM2")
+    local old = parent:FindFirstChild("FlickMM2V2")
     if old then old:Destroy() end
 
     local gui = Instance.new("ScreenGui")
-    gui.Name = "FlickMM2"
+    gui.Name = "FlickMM2V2"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.DisplayOrder = 10
     gui.Parent = parent
 
-    -- ---------- FLOATING BUTTON ----------
+    -- ---------- FLOATING ⚡ BUTTON ----------
     local circle = Instance.new("TextButton")
+    circle.Name = "FloatingButton"
     circle.Size = UDim2.new(0, 52, 0, 52)
     circle.Position = UDim2.new(0.86, 0, 0.82, 0)
-    circle.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+    circle.BackgroundColor3 = Theme.accent
     circle.BorderSizePixel = 0
     circle.Text = "⚡"
     circle.TextColor3 = Color3.new(1, 1, 1)
@@ -473,51 +872,70 @@ local function buildGUI()
     circle.AutoButtonColor = false
     circle.Parent = gui
     Instance.new("UICorner", circle).CornerRadius = UDim.new(1, 0)
+
     local circleStroke = Instance.new("UIStroke", circle)
-    circleStroke.Color = Color3.fromRGB(255, 180, 180)
+    circleStroke.Color = Theme.accentSoft
     circleStroke.Thickness = 1.5
     circleStroke.Transparency = 0.4
-    makeDraggable(circle, circle)
+
+    -- [7] drag-vs-click: getDragState() возвращает (dist, isDrag)
+    local getDragState = makeDraggable(circle, circle, 5)
 
     -- ---------- MAIN FRAME ----------
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 320, 0, 560)
-    frame.Position = UDim2.new(0.5, -160, 0.5, -280)
-    frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+    frame.Name = "MainFrame"
+    frame.Size = UDim2.new(0, 320, 0, 600)
+    frame.Position = UDim2.new(0.5, -160, 0.5, -300)
+    frame.BackgroundColor3 = Theme.bg
     frame.BorderSizePixel = 0
     frame.Visible = false
     frame.Active = true
     frame.Parent = gui
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+
     local frameStroke = Instance.new("UIStroke", frame)
-    frameStroke.Color = Color3.fromRGB(45, 45, 55)
+    frameStroke.Color = Theme.stroke
     frameStroke.Thickness = 1
 
     -- ---------- HEADER ----------
     local header = Instance.new("Frame")
+    header.Name = "Header"
     header.Size = UDim2.new(1, 0, 0, 44)
-    header.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+    header.BackgroundColor3 = Theme.panel
     header.BorderSizePixel = 0
     header.Parent = frame
     Instance.new("UICorner", header).CornerRadius = UDim.new(0, 12)
+
     local headerFix = Instance.new("Frame")
     headerFix.Size = UDim2.new(1, 0, 0, 12)
     headerFix.Position = UDim2.new(0, 0, 1, -12)
-    headerFix.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+    headerFix.BackgroundColor3 = Theme.panel
     headerFix.BorderSizePixel = 0
     headerFix.Parent = header
-    makeDraggable(frame, header)
+
+    makeDraggable(frame, header, 5)
 
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -60, 1, 0)
+    title.Size = UDim2.new(1, -110, 1, 0)
     title.Position = UDim2.new(0, 14, 0, 0)
     title.BackgroundTransparency = 1
     title.Text = "⚡ FLICK MM2"
-    title.TextColor3 = Color3.fromRGB(255, 100, 100)
+    title.TextColor3 = Theme.accent
     title.Font = Enum.Font.GothamBold
     title.TextSize = 15
     title.TextXAlignment = Enum.TextXAlignment.Left
     title.Parent = header
+
+    local ver = Instance.new("TextLabel")
+    ver.Size = UDim2.new(0, 60, 1, 0)
+    ver.Position = UDim2.new(1, -76, 0, 0)
+    ver.BackgroundTransparency = 1
+    ver.Text = "v" .. (V2.Version and V2.Version.script or "2.0.0")
+    ver.TextColor3 = Theme.textDim
+    ver.Font = Enum.Font.Gotham
+    ver.TextSize = 11
+    ver.TextXAlignment = Enum.TextXAlignment.Right
+    ver.Parent = header
 
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.new(0, 28, 0, 28)
@@ -525,7 +943,7 @@ local function buildGUI()
     closeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
     closeBtn.BorderSizePixel = 0
     closeBtn.Text = "✕"
-    closeBtn.TextColor3 = Color3.fromRGB(220, 220, 230)
+    closeBtn.TextColor3 = Theme.text
     closeBtn.Font = Enum.Font.GothamBold
     closeBtn.TextSize = 13
     closeBtn.Parent = header
@@ -536,6 +954,7 @@ local function buildGUI()
 
     -- ---------- SCROLL ----------
     local scroll = Instance.new("ScrollingFrame")
+    scroll.Name = "Scroll"
     scroll.Size = UDim2.new(1, -16, 1, -56)
     scroll.Position = UDim2.new(0, 8, 0, 50)
     scroll.BackgroundTransparency = 1
@@ -552,249 +971,104 @@ local function buildGUI()
         scroll.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 8)
     end)
 
-    -- ---------- COMPONENTS ----------
-    local function section(text)
-        local s = Instance.new("TextLabel")
-        s.Size = UDim2.new(1, 0, 0, 22)
-        s.BackgroundTransparency = 1
-        s.Text = "── " .. text .. " ──"
-        s.TextColor3 = Color3.fromRGB(255, 140, 140)
-        s.Font = Enum.Font.GothamMedium
-        s.TextSize = 11
-        s.TextXAlignment = Enum.TextXAlignment.Left
-        s.Parent = scroll
-    end
+    -- ---------- SECTIONS ----------
+    W.section(scroll, "CORE")
+    W.toggle(scroll, "Enable Flick",  "Enabled")
+    W.toggle(scroll, "Instant Flick", "InstantFlick")
+    W.slider(scroll, "Flick Speed", "FlickSpeed", 1, 240, false, 1)
+    W.slider(scroll, "Flick Cooldown (s)", "FlickCooldown", 0.05, 1.0, true, 0.01)
 
-    local function toggle(label, key)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, 0, 0, 34)
-        btn.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-        btn.BorderSizePixel = 0
-        btn.AutoButtonColor = false
-        btn.Text = ""
-        btn.Parent = scroll
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+    W.section(scroll, "SHOOT")
+    W.toggle(scroll, "Auto Shoot", "AutoShoot")
+    W.toggle(scroll, "Auto Unequip After Shot", "AutoUnequip")
+    W.toggle(scroll, "Wall Check (Raycast)", "WallCheck")
 
-        local name = Instance.new("TextLabel")
-        name.Size = UDim2.new(1, -70, 1, 0)
-        name.Position = UDim2.new(0, 12, 0, 0)
-        name.BackgroundTransparency = 1
-        name.Text = label
-        name.TextColor3 = Color3.fromRGB(230, 230, 240)
-        name.Font = Enum.Font.Gotham
-        name.TextSize = 12
-        name.TextXAlignment = Enum.TextXAlignment.Left
-        name.Parent = btn
+    W.section(scroll, "AIM PREDICT")
+    W.toggle(scroll, "Predict", "PredictEnabled")
+    W.toggle(scroll, "Ping Compensation", "PingComp")
+    W.toggle(scroll, "Velocity Smoothing", "VelocitySmooth")
+    W.slider(scroll, "Predict X/Z", "PredictXZ", 0.0, 0.5, true, 0.001)
+    W.slider(scroll, "Predict Y",   "PredictY",  0.0, 0.2, true, 0.001)
 
-        local pill = Instance.new("Frame")
-        pill.Size = UDim2.new(0, 40, 0, 20)
-        pill.Position = UDim2.new(1, -52, 0.5, -10)
-        pill.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
-        pill.BorderSizePixel = 0
-        pill.Parent = btn
-        Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
+    W.section(scroll, "SYSTEM")
+    W.toggle(scroll, "Notifications", "Notifications")
+    W.slider(scroll, "Cache Interval (s)", "CacheInterval", 0.25, 5.0, true, 0.05)
 
-        local knob = Instance.new("Frame")
-        knob.Size = UDim2.new(0, 16, 0, 16)
-        knob.Position = UDim2.new(0, 2, 0.5, -8)
-        knob.BackgroundColor3 = Color3.fromRGB(180, 180, 190)
-        knob.BorderSizePixel = 0
-        knob.Parent = pill
-        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
-
-        local onColor  = Color3.fromRGB(90, 160, 110)
-        local offColor = Color3.fromRGB(50, 50, 60)
-
-        local function render()
-            local v = Config[key]
-            pill.BackgroundColor3 = v and onColor or offColor
-            knob.Position = v and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
-            knob.BackgroundColor3 = v and Color3.fromRGB(240, 240, 245) or Color3.fromRGB(150, 150, 160)
-        end
-        render()
-
-        btn.MouseButton1Click:Connect(function()
-            Config[key] = not Config[key]
-            render()
-            Save()
-        end)
-    end
-
-    local function slider(label, key, min, max, isFloat, step)
-        step = step or (isFloat and 0.001 or 1)
-        local wrap = Instance.new("Frame")
-        wrap.Size = UDim2.new(1, 0, 0, 52)
-        wrap.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-        wrap.BorderSizePixel = 0
-        wrap.Parent = scroll
-        Instance.new("UICorner", wrap).CornerRadius = UDim.new(0, 7)
-
-        local name = Instance.new("TextLabel")
-        name.Size = UDim2.new(1, -70, 0, 22)
-        name.Position = UDim2.new(0, 12, 0, 4)
-        name.BackgroundTransparency = 1
-        name.TextColor3 = Color3.fromRGB(230, 230, 240)
-        name.Font = Enum.Font.Gotham
-        name.TextSize = 12
-        name.TextXAlignment = Enum.TextXAlignment.Left
-        name.Parent = wrap
-
-        local box = Instance.new("TextBox")
-        box.Size = UDim2.new(0, 54, 0, 22)
-        box.Position = UDim2.new(1, -66, 0, 4)
-        box.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
-        box.BorderSizePixel = 0
-        box.TextColor3 = Color3.fromRGB(240, 240, 245)
-        box.Font = Enum.Font.Gotham
-        box.TextSize = 12
-        box.ClearTextOnFocus = false
-        box.Parent = wrap
-        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 5)
-
-        local bg = Instance.new("Frame")
-        bg.Size = UDim2.new(1, -24, 0, 6)
-        bg.Position = UDim2.new(0, 12, 1, -14)
-        bg.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
-        bg.BorderSizePixel = 0
-        bg.Parent = wrap
-        Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
-
-        local fill = Instance.new("Frame")
-        fill.Size = UDim2.new(0, 0, 1, 0)
-        fill.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-        fill.BorderSizePixel = 0
-        fill.Parent = bg
-        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
-
-        local function fmt(v)
-            if isFloat then
-                return string.format("%.3f", v):gsub("0+$", ""):gsub("%.$", "")
-            end
-            return tostring(math.floor(v))
-        end
-
-        local function render()
-            local v = Config[key]
-            local alpha = (v - min) / (max - min)
-            alpha = math.clamp(alpha, 0, 1)
-            fill.Size = UDim2.new(alpha, 0, 1, 0)
-            name.Text = label
-            box.Text = fmt(v)
-        end
-        render()
-
-        local dragging = false
-        local function setFromInput(input)
-            local absX = bg.AbsolutePosition.X
-            local absW = bg.AbsoluteSize.X
-            local rel = math.clamp((input.Position.X - absX) / absW, 0, 1)
-            local raw = min + rel * (max - min)
-            local snapped = math.floor(raw / step + 0.5) * step
-            snapped = math.clamp(snapped, min, max)
-            Config[key] = snapped
-            render()
-        end
-
-        bg.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch then
-                dragging = true
-                setFromInput(input)
-            end
-        end)
-        UIS.InputChanged:Connect(function(input)
-            if not dragging then return end
-            if input.UserInputType == Enum.UserInputType.MouseMovement
-            or input.UserInputType == Enum.UserInputType.Touch then
-                setFromInput(input)
-            end
-        end)
-        UIS.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch then
-                if dragging then
-                    dragging = false
-                    Save()
+    -- ---------- BIND ----------
+    local bindBtn = W.button(scroll,
+        "⌨️ BIND: " .. Config.Keybind,
+        function()
+            bindBtn.Text = "⌨️ PRESS A KEY..."
+            StartBind()
+            task.delay(3.2, function()
+                if bindBtn and bindBtn.Parent then
+                    bindBtn.Text = "⌨️ BIND: " .. Config.Keybind
                 end
-            end
-        end)
+            end)
+        end,
+        Color3.fromRGB(55, 50, 40))
 
-        box.FocusLost:Connect(function()
-            local n = tonumber(box.Text)
-            if n then
-                n = math.clamp(n, min, max)
-                local snapped = math.floor(n / step + 0.5) * step
-                Config[key] = snapped
-                Save()
-            end
-            render()
-        end)
-    end
+    -- ---------- CACHE STATUS ----------
+    local cacheLabel = Instance.new("TextLabel")
+    cacheLabel.Size = UDim2.new(1, 0, 0, 22)
+    cacheLabel.BackgroundTransparency = 1
+    cacheLabel.Text = "cache: —"
+    cacheLabel.TextColor3 = Theme.textDim
+    cacheLabel.Font = Enum.Font.Gotham
+    cacheLabel.TextSize = 11
+    cacheLabel.TextXAlignment = Enum.TextXAlignment.Left
+    cacheLabel.Parent = scroll
 
-    local function button(label, onClick, color)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, 0, 0, 32)
-        btn.BackgroundColor3 = color or Color3.fromRGB(40, 40, 50)
-        btn.BorderSizePixel = 0
-        btn.AutoButtonColor = false
-        btn.Text = label
-        btn.TextColor3 = Color3.fromRGB(235, 235, 240)
-        btn.Font = Enum.Font.GothamMedium
-        btn.TextSize = 12
-        btn.Parent = scroll
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
-        btn.MouseButton1Click:Connect(onClick)
-        return btn
-    end
-
-    -- ---------- LAYOUT ----------
-    section("CORE")
-    toggle("Enable Flick", "Enabled")
-    toggle("Instant Flick", "InstantFlick")
-    slider("Flick Speed", "FlickSpeed", 1, 240, false, 1)
-
-    section("SHOOT")
-    toggle("Auto Shoot", "AutoShoot")
-    toggle("Auto Unequip After Shot", "AutoUnequip")
-
-    section("AIM PREDICT")
-    toggle("Predict", "PredictEnabled")
-    toggle("Ping Compensation", "PingComp")
-    toggle("Velocity Smoothing", "VelocitySmooth")
-    slider("Predict X/Z", "PredictXZ", 0.0, 0.5, true, 0.001)
-    slider("Predict Y",   "PredictY",  0.0, 0.2, true, 0.001)
-
-    section("SYSTEM")
-    toggle("Notifications", "Notifications")
-    slider("Cache Interval (s)", "CacheInterval", 0.25, 5.0, true, 0.05)
-
-    local bindBtn = button("⌨️ BIND: " .. Config.Keybind, function()
-        bindBtn.Text = "⌨️ PRESS A KEY..."
-        StartBind()
-        task.delay(3.2, function()
-            bindBtn.Text = "⌨️ BIND: " .. Config.Keybind
-        end)
-    end, Color3.fromRGB(55, 50, 40))
-
-    button("👁 Hide GUI", function()
-        frame.Visible = false
+    task.spawn(function()
+        while cacheLabel and cacheLabel.Parent do
+            local p, ticks = GetCache()
+            local name = p and p.Name or "nil"
+            cacheLabel.Text = string.format("cache: %s (ticks=%d)", name, ticks or 0)
+            task.wait(1)
+        end
     end)
 
-    button("💀 Unload", function()
-        getgenv()._flickCacheRunning = false
+    -- ---------- ACTIONS ----------
+    W.button(scroll, "👁 Hide GUI", function()
+        frame.Visible = false
+    end, Color3.fromRGB(40, 40, 50))
+
+    W.button(scroll, "🔁 Refresh Cache Now", function()
+        -- просто пингуем цикл: сбрасываем интервал через правку Config
+        Save()
+        Notify("Cache will refresh on next tick.", 1)
+    end, Color3.fromRGB(40, 45, 55))
+
+    W.button(scroll, "💀 Unload", function()
+        getgenv()._flickV2CacheRunning = false
         pcall(function() gui:Destroy() end)
         Notify("Unloaded.", 2)
-    end, Color3.fromRGB(70, 40, 40))
+    end, Theme.danger)
 
-    -- ---------- OPEN/CLOSE ----------
+    -- ---------- [7] CIRCLE CLICK (только если не драг) ----------
     circle.MouseButton1Click:Connect(function()
+        local dist, isDrag = getDragState()
+        if isDrag then return end   -- тащили — не открываем
         frame.Visible = not frame.Visible
+    end)
+
+    -- ---------- CLOSE ON OPEN-OTHER ----------
+    frame:GetPropertyChangedSignal("Visible"):Connect(function()
+        if frame.Visible then
+            -- bring to front
+            gui.DisplayOrder = 11
+        else
+            gui.DisplayOrder = 10
+        end
     end)
 
     return gui
 end
 
--- =================== GO ===================
-buildGUI()
-Notify("GUI ready. F to flick, ⚡ to open menu.", 3)
-print("[FlickMM2] Часть 2 загружена. GUI готов.")
+-- ===================== G2-BOOT =====================
+builtGui = build()
+
+Notify("GUI v2 ready. " .. Config.Keybind .. " = flick. ⚡ to open.", 3)
+print(("[FlickV2] Часть 2 OK · script=%s · config=%d")
+    :format(V2.Version.script, V2.Version.config))
+print("[FlickV2] Полный скрипт загружен.")
