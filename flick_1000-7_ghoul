@@ -1,5 +1,5 @@
 --[[
-    Flick To Murderer - Autonomous (God-Tier Accuracy)
+    Flick To Murderer - Autonomous (God-Tier Accuracy + Camera Fix)
     Updated for: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
 
@@ -197,7 +197,9 @@ function DragSystem.MakeDraggable(gui, dragArea, onPositionChanged)
 end
 
 -- ========== CORE ==========
-local lastCameraCFrame = nil; local returnToken = 0
+local lastCameraCFrame = nil
+local lastCameraRootPos = nil
+local returnToken = 0
 
 function findMurderer()
     if game.PlaceId == 142823291 then
@@ -221,7 +223,6 @@ function findMurderer()
     return nil
 end
 
--- ОБНОВЛЕННЫЙ ПОИСК РЕМОУТА (по твоему скриншоту)
 local function findShootRemote()
     local remotes = ReplicatedStorage:FindFirstChild("Remotes")
     if not remotes then return nil end
@@ -230,22 +231,17 @@ local function findShootRemote()
     return gunFolder:FindFirstChild("Shoot")
 end
 
--- ОБНОВЛЕННЫЙ ВЫСТРЕЛ (пробуем разные форматы)
 local function fireOnce(targetPos)
     local cam = workspace.CurrentCamera
     if not cam then return end
 
     local remote = findShootRemote()
     if remote then
-        -- Пробуем формат 1: просто Vector3 позиции цели
         pcall(function() remote:FireServer(targetPos) end)
-        -- Пробуем формат 2: CFrame позиции цели
         pcall(function() remote:FireServer(CFrame.new(targetPos)) end)
-        -- Пробуем формат 3: массив из камеры и цели (как было в старом скрипте)
         pcall(function() remote:FireServer({ cam.CFrame, CFrame.new(targetPos) }) end)
     end
 
-    -- Дублируем выстрел через физическую пушку (она сама ударит в камеру)
     local char = LocalPlayer.Character
     if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid")
@@ -262,19 +258,35 @@ local function returnCameraWithRandomness(token, onDone)
     local function done() if onDone then onDone() end end
     if token and token ~= returnToken then return done() end
     if not Config.ReturnCamera or not lastCameraCFrame then return done() end
+    
     local cam = workspace.CurrentCamera
-    local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100); local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
+    local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
+    local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
     local newLook = (lastCameraCFrame.LookVector + lastCameraCFrame.RightVector * randomX + lastCameraCFrame.UpVector * randomY).Unit
-    local targetCFrame = CFrame.lookAt(lastCameraCFrame.Position, lastCameraCFrame.Position + newLook)
+    
+    local targetCFrame = lastCameraCFrame
+    local char = LocalPlayer.Character
+    local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+    
+    if rootPart and lastCameraRootPos then
+        local offsetPos = lastCameraCFrame.Position - lastCameraRootPos
+        targetCFrame = CFrame.new(rootPart.Position + offsetPos) * (lastCameraCFrame - lastCameraCFrame.Position)
+    else
+        targetCFrame = CFrame.lookAt(lastCameraCFrame.Position, lastCameraCFrame.Position + newLook)
+    end
+    
     local oldCFrame = cam.CFrame
     local angleDist = math.acos(math.clamp(oldCFrame.LookVector:Dot(targetCFrame.LookVector), -1, 1))
     local totalTime = math.clamp(angleDist / (Config.ReturnSpeed * 2), 0.01, 0.35)
     local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
+    
     for i = 1, steps do
         if token and token ~= returnToken then return done() end
         cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps); task.wait(totalTime / steps)
     end
-    lastCameraCFrame = nil; done()
+    lastCameraCFrame = nil
+    lastCameraRootPos = nil
+    done()
 end
 
 function flickToMurderer()
@@ -290,7 +302,11 @@ function flickToMurderer()
     local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then notify("Target part not found!", 1) return end
 
-    if Config.ReturnCamera then lastCameraCFrame = cam.CFrame end
+    if Config.ReturnCamera then 
+        lastCameraCFrame = cam.CFrame 
+        lastCameraRootPos = rootPart.Position 
+    end
+    
     local prevAutoRotate = hum.AutoRotate; local prevCamType = cam.CameraType; local prevCamSubject = cam.CameraSubject
     local camLocked = false
 
@@ -315,11 +331,21 @@ function flickToMurderer()
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
     local isFirstPerson = (cam.CFrame.Position - headPos).Magnitude < 5
     local newCamCFrame
+    
     if isFirstPerson then
         newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
     else
-        local distance = (cam.CFrame.Position - rootPart.Position).Magnitude
-        newCamCFrame = CFrame.lookAt(rootPart.Position + (targetPos - rootPart.Position).Unit * distance, targetPos)
+        local offset = cam.CFrame.Position - rootPart.Position
+        local flatOffset = Vector3.new(offset.X, 0, offset.Z)
+        local flatTargetDir = Vector3.new(targetPos.X - rootPart.Position.X, 0, targetPos.Z - rootPart.Position.Z)
+        
+        if flatOffset.Magnitude > 0.1 and flatTargetDir.Magnitude > 0.1 then
+            local angle = math.atan2(flatTargetDir.X, flatTargetDir.Z) - math.atan2(flatOffset.X, flatOffset.Z)
+            local rotatedOffset = CFrame.Angles(0, angle, 0) * offset
+            newCamCFrame = CFrame.lookAt(rootPart.Position + rotatedOffset, targetPos)
+        else
+            newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
+        end
     end
 
     if Config.InstantFlick then
@@ -407,7 +433,7 @@ local function createMainGUI()
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
 
     local Title = Instance.new("TextLabel", MainFrame); Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5)
-    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK (ACCURACY EDITION)"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
+    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK (CAMERA FIXED)"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
     DragSystem.MakeDraggable(MainFrame, Title)
 
     local Container = Instance.new("ScrollingFrame", MainFrame); Container.Size = UDim2.new(1, -20, 1, -50); Container.Position = UDim2.new(0, 10, 0, 45)
@@ -536,5 +562,5 @@ getgenv().flickToMurderer = flickToMurderer
 setupKeybind()
 createMainGUI()
 
-notify("⚡ FLICK (ACCURACY EDITION) LOADED ⚡", 3)
-print("Flick To Murderer loaded - Accuracy Edition")
+notify("⚡ FLICK (CAMERA FIXED) LOADED ⚡", 3)
+print("Flick To Murderer loaded - Camera Bug Fixed")
