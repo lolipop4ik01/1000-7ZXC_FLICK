@@ -1,6 +1,6 @@
 --[[
-    Flick To Murderer - Version 2.7.0
-    Native Camera Fix (MouseBehavior + RootPart)
+    Flick To Murderer - Version 2.8.0
+    (Clean Camera + No Mouse Freeze + AutoRotate Safe)
 ]]
 
 local Players = game:GetService("Players")
@@ -36,7 +36,7 @@ local Config = {
     ServerSidePredict = true,
     
     ReturnCamera = true,
-    ReturnDelay = 150,
+    ReturnDelay = 100,
 }
 
 local CONFIG_FILE = "flick_config_standalone.json"
@@ -254,9 +254,12 @@ local function fireOnce(targetPos)
     end
 end
 
--- ========== FLICK LOGIC (NATIVE ROTATE) ==========
+-- ========== FLICK LOGIC (PERFECT CAMERA SYNC) ==========
+local flickToken = 0
+local isProcessing = false
+
 local function flickToMurderer()
-    if not Config.Enabled then notify("Flick disabled", 1) return end
+    if not Config.Enabled or isProcessing then return end
     local murderer = findMurderer()
     if not murderer or not murderer.Character then notify("Murderer not found", 1) return end
     
@@ -278,49 +281,87 @@ local function flickToMurderer()
         return
     end
 
-    -- 1. Включаем нативный ShiftLock, чтобы камера следовала за телом
-    local oldBehavior = UserInputService.MouseBehavior
-    if oldBehavior ~= Enum.MouseBehavior.LockCenter then
-        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-        RunService.RenderStepped:Wait() -- Ждем 1 кадр, чтобы камера встала на плечо
-    end
+    isProcessing = true
+    flickToken = flickToken + 1
+    local myToken = flickToken
+    
+    local startCamCFrame = cam.CFrame
+    local startOffset = startCamCFrame.Position - root.Position
+    local startLook = startCamCFrame.LookVector
 
-    -- 2. Поворачиваем ТЕЛО на мёрдера (камера повернется вместе с ним нативно)
+    -- Отключаем AutoRotate ТОЛЬКО на время флика
+    local oldAutoRotate = hum.AutoRotate
+    hum.AutoRotate = false
+
+    -- 1. Поворачиваем тело на мёрдера
     local flatTarget = Vector3.new(targetPos.X, root.Position.Y, targetPos.Z)
     local dir = flatTarget - root.Position
     if dir.Magnitude > 0.01 then
         local targetCF = CFrame.lookAt(root.Position, root.Position + dir.Unit)
-        
         if Config.InstantFlick then
             root.CFrame = targetCF
         else
-            -- Плавный поворот тела (камера будет плавно следовать)
             local startCF = root.CFrame
             local t0 = tick()
             local dur = math.clamp(1 / (Config.FlickSpeed / 100), 0.01, 0.5)
             while tick() - t0 < dur do
                 if not root.Parent then break end
-                local a = (tick() - t0) / dur
-                root.CFrame = startCF:Lerp(targetCF, a)
+                root.CFrame = startCF:Lerp(targetCF, (tick() - t0) / dur)
                 RunService.RenderStepped:Wait()
             end
         end
     end
 
-    -- 3. Синхронизация с сервером и выстрел
+    -- 2. Перехватываем камеру ровно на 1 кадр
+    local bindName = "FlickCam_" .. myToken
+    local isFinished = false
+
+    RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 1, function()
+        if isFinished or not LocalPlayer.Character then 
+            RunService:UnbindFromRenderStep(bindName)
+            return 
+        end
+        local curRoot = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if curRoot then
+            -- Камера смотрит на цель, оставаясь за спиной игрока
+            local newCamPos = curRoot.Position + startOffset
+            cam.CFrame = CFrame.lookAt(newCamPos, targetPos)
+        end
+    end)
+
+    cam.CameraType = Enum.CameraType.Scriptable
+
+    -- 3. Ждем 1 Heartbeat для синхронизации с сервером
     RunService.Heartbeat:Wait()
+    
+    if myToken ~= flickToken then 
+        isProcessing = false
+        return 
+    end
+
+    -- 4. СТРЕЛЯЕМ
     if Config.AutoShoot then
         fireOnce(targetPos)
     end
 
-    -- 4. Возврат управления мышью (камера плавно вернется туда, куда смотрит мышка)
-    if Config.ReturnCamera then
-        task.delay(Config.ReturnDelay / 1000, function()
-            UserInputService.MouseBehavior = oldBehavior
-        end)
-    else
-        UserInputService.MouseBehavior = oldBehavior
-    end
+    -- 5. Возвращаем камеру
+    task.delay(Config.ReturnDelay / 1000, function()
+        if myToken ~= flickToken then return end
+        
+        isFinished = true
+        RunService:UnbindFromRenderStep(bindName)
+
+        -- Возвращаем Custom, чтобы игра сама вернула камеру в нормальное русло
+        cam.CameraType = Enum.CameraType.Custom
+        if hum then cam.CameraSubject = hum end
+        
+        -- ВОЗВРАЩАЕМ AUTOROTATE
+        if hum and hum.Parent then
+            hum.AutoRotate = oldAutoRotate
+        end
+        
+        isProcessing = false
+    end)
 end
 
 -- ========== KEYBIND ==========
@@ -380,7 +421,7 @@ local function createMainGUI()
     Title.Size = UDim2.new(1, 0, 0, 40)
     Title.Position = UDim2.new(0, 0, 0, 5)
     Title.BackgroundTransparency = 1
-    Title.Text = "⚡ FLICK 2.7.0"
+    Title.Text = "⚡ FLICK 2.8.0"
     Title.TextColor3 = Color3.fromRGB(255, 100, 100)
     Title.Font = Enum.Font.Jura
     Title.TextSize = 18
@@ -561,9 +602,15 @@ local function createMainGUI()
         end
     end)
 
-    addButton("🔄 RESET MOUSE STATE", function()
+    addButton("🔄 FORCE RESET (IF STUCK)", function()
+        local cam = workspace.CurrentCamera
+        if cam then cam.CameraType = Enum.CameraType.Custom end
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.AutoRotate = true end
         UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        notify("Mouse state reset", 2)
+        flickToken = flickToken + 1
+        isProcessing = false
+        notify("Camera & Mouse Reset", 2)
     end)
 
     CircleButton.MouseButton1Click:Connect(function()
@@ -581,4 +628,4 @@ getgenv().flickToMurderer = flickToMurderer
 setupKeybind()
 pcall(createMainGUI)
 
-notify("⚡ FLICK 2.7.0 LOADED ⚡", 3)
+notify("⚡ FLICK 2.8.0 LOADED ⚡", 3)
