@@ -1,5 +1,5 @@
 --[[
-    Flick To Murderer - Version 2.3.0
+    Flick To Murderer - Version 2.4.0
 ]]
 
 local Players = game:GetService("Players")
@@ -41,12 +41,9 @@ local Config = {
     ReturnDelay = 100,
 }
 
--- ========== SAVE / LOAD ==========
 local CONFIG_FILE = "flick_config_standalone.json"
 local function saveConfig()
-    pcall(function()
-        if writefile then writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end
-    end)
+    pcall(function() if writefile then writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end end)
 end
 local function loadConfig()
     pcall(function()
@@ -103,10 +100,31 @@ local function notify(msg, dur)
 end
 
 local function getPing()
-    local ok, v = pcall(function()
-        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
-    end)
+    local ok, v = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
     return (ok and v and v > 0) and (v / 1000) or 0
+end
+
+local function makeDraggable(frame, dragArea)
+    dragArea = dragArea or frame
+    local dragging, dragStart, startPos = false, nil, nil
+    dragArea.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+        end
+    end)
+    dragArea.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
 end
 
 -- ========== VELOCITY / PREDICT ==========
@@ -180,32 +198,8 @@ local function resetCameraToCustom()
     end
 end
 
--- ========== DRAG SYSTEM (BEFORE GUI) ==========
-local DragSystem = {}
-function DragSystem.MakeDraggable(gui, dragArea)
-    local dragging, dragStart, startPos = false, nil, nil
-    dragArea.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            dragStart = input.Position
-            startPos = gui.Position
-        end
-    end)
-    dragArea.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = false
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-            local delta = input.Position - dragStart
-            gui.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end)
-end
-
 -- ========== MURDERER FINDER ==========
-function findMurderer()
+local function findMurderer()
     if game.PlaceId == 142823291 then
         local ok, data = pcall(function()
             local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
@@ -273,8 +267,8 @@ local function fireOnce(targetPos)
     end
 end
 
--- ========== FLICK ==========
-function flickToMurderer()
+-- ========== FLICK LOGIC ==========
+local function flickToMurderer()
     if not Config.Enabled then notify("Flick disabled", 1) return end
     local murderer = findMurderer()
     if not murderer or not murderer.Character then notify("Murderer not found", 1) return end
@@ -332,7 +326,6 @@ function flickToMurderer()
     end
 
     if myToken ~= flickToken then return end
-
     if Config.ReplicationSync then RunService.Heartbeat:Wait() end
     if myToken ~= flickToken then return end
 
@@ -358,6 +351,7 @@ function flickToMurderer()
                 targetCF = CFrame.lookAt(newPos, newPos + targetCF.LookVector)
             end
             if not targetCF then resetCameraToCustom() return end
+            
             local rx = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
             local ry = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
             local newLook = (targetCF.LookVector + targetCF.RightVector * rx + targetCF.UpVector * ry).Unit
@@ -393,9 +387,7 @@ end
 -- ========== KEYBIND ==========
 local waitingForBind = false
 local function setupKeybind()
-    if getgenv().FlickKeybindConn then
-        pcall(function() getgenv().FlickKeybindConn:Disconnect() end)
-    end
+    if getgenv().FlickKeybindConn then pcall(function() getgenv().FlickKeybindConn:Disconnect() end) end
     getgenv().FlickKeybindConn = UserInputService.InputBegan:Connect(function(input, gp)
         if gp then return end
         if waitingForBind then
@@ -434,7 +426,7 @@ local function createMainGUI()
     CircleButton.TextSize = 24
     CircleButton.Parent = MainGui
     Instance.new("UICorner", CircleButton).CornerRadius = UDim.new(1, 0)
-    DragSystem.MakeDraggable(CircleButton, CircleButton)
+    makeDraggable(CircleButton)
 
     MainFrame = Instance.new("Frame")
     MainFrame.Size = UDim2.new(0, 320, 0, 700)
@@ -449,12 +441,12 @@ local function createMainGUI()
     Title.Size = UDim2.new(1, 0, 0, 40)
     Title.Position = UDim2.new(0, 0, 0, 5)
     Title.BackgroundTransparency = 1
-    Title.Text = "⚡ FLICK 2.3.0"
+    Title.Text = "⚡ FLICK 2.4.0"
     Title.TextColor3 = Color3.fromRGB(255, 100, 100)
     Title.Font = Enum.Font.Jura
     Title.TextSize = 18
     Title.Active = true
-    DragSystem.MakeDraggable(MainFrame, Title)
+    makeDraggable(MainFrame, Title)
 
     local Container = Instance.new("ScrollingFrame", MainFrame)
     Container.Size = UDim2.new(1, -20, 1, -50)
@@ -539,18 +531,18 @@ local function createMainGUI()
         end
 
         sliderBg.InputBegan:Connect(function(i)
-            if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
                 dragging = true
                 handleInput(i)
             end
         end)
         UserInputService.InputChanged:Connect(function(i)
-            if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
                 handleInput(i)
             end
         end)
         UserInputService.InputEnded:Connect(function(i)
-            if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
                 dragging = false
             end
         end)
@@ -667,10 +659,11 @@ getgenv().FlickLoaded = true
 getgenv().flickToMurderer = flickToMurderer
 
 setupKeybind()
+
 local guiOk, guiErr = pcall(createMainGUI)
 if not guiOk then
     warn("[FLICK] GUI error: " .. tostring(guiErr))
 end
 
-notify("⚡ FLICK 2.3.0 LOADED ⚡", 3)
-print("[FLICK] Version 2.3.0 loaded")
+notify("⚡ FLICK 2.4.0 LOADED ⚡", 3)
+print("[FLICK] Version 2.4.0 loaded")
