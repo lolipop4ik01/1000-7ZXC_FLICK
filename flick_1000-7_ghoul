@@ -1,19 +1,12 @@
 --[[
-    Flick To Murderer - Автономная версия
-    Все функции встроены, не требует плагинов
-    + Aim Predict (Ping Comp + Velocity Smoothing)
-    + Текстовый ввод для слайдеров
-    + Отключение уведомлений
-    + Автоматический возврат камеры
-    + Выбор парта цели (по умолчанию HRP - центр)
-    + Визуализация предикта
+    Flick To Murderer - Autonomous (God-Tier Accuracy)
+    Updated for: ReplicatedStorage.Remotes.Gun.Shoot
 ]]
 
--- ========== СЕРВИСЫ ==========
+-- ========== SERVICES ==========
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
@@ -22,38 +15,42 @@ local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
 
--- ========== КОНФИГ ==========
+-- ========== CONFIG ==========
 local Config = {
     Enabled = false,
-    FlickSpeed = 100,
     Keybind = "F",
-    AutoShoot = false,
     InstantFlick = true,
+    FlickSpeed = 100,
+    AutoShoot = false,
+    NotificationsEnabled = true,
+    TargetPart = "HumanoidRootPart",
+    ShowPredictVisual = false,
+
+    PredictEnabled = true,
+    PredictOp = "Multiply",
+    PredictXZ = 0.091,
+    PredictY = 0.011,
+    VelocitySmooth = true,
+
+    ServerSidePredict = true,
+    PingComp = false,
+    ReplicationSync = true,
+    CameraLock = true,
+    AutoRotateLock = true,
+    BurstFire = false,
+    BurstCount = 2,
+    BurstDelay = 40,
+
     ReturnCamera = true,
     ReturnSpeed = 120,
     ReturnRandomnessX = 25,
     ReturnRandomnessY = 25,
     ReturnDelay = 100,
-    NotificationsEnabled = true,
-    
-    TargetPart = "HumanoidRootPart",
-    ShowPredictVisual = false,
-    
-    PredictEnabled = false,
-    PredictOp = "Multiply",
-    PredictXZ = 0.091,
-    PredictY = 0.011,
-    PingComp = false,
-    VelocitySmooth = true,
 }
 
--- ========== СОХРАНЕНИЕ ==========
+-- ========== SAVE ==========
 local CONFIG_FILE = "flick_config_standalone.json"
-local function saveConfig()
-    pcall(function()
-        if writefile then writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end
-    end)
-end
+local function saveConfig() pcall(function() if writefile then writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end end) end
 local function loadConfig()
     pcall(function()
         if readfile and isfile and isfile(CONFIG_FILE) then
@@ -64,7 +61,7 @@ local function loadConfig()
 end
 loadConfig()
 
--- ========== ВСПОМОГАТЕЛЬНЫЕ ==========
+-- ========== HELPERS ==========
 local function getSafeParent()
     local parent = gethui and gethui()
     if parent and typeof(parent) == "Instance" then return parent end
@@ -79,282 +76,194 @@ local function notify(msg, duration)
     pcall(function()
         local sg = getSafeParent():FindFirstChild("FlickNotifications")
         if not sg then
-            sg = Instance.new("ScreenGui")
-            sg.Name = "FlickNotifications"
-            sg.ResetOnSpawn = false
-            sg.IgnoreGuiInset = true
-            sg.Parent = getSafeParent()
+            sg = Instance.new("ScreenGui"); sg.Name = "FlickNotifications"; sg.ResetOnSpawn = false; sg.IgnoreGuiInset = true; sg.Parent = getSafeParent()
         end
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0, 250, 0, 40)
-        frame.Position = UDim2.new(0.5, -125, 0.8, 0)
-        frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-        frame.BackgroundTransparency = 0.2
-        frame.BorderSizePixel = 0
-        frame.Parent = sg
+        frame.Size = UDim2.new(0, 250, 0, 40); frame.Position = UDim2.new(0.5, -125, 0.8, 0)
+        frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25); frame.BackgroundTransparency = 0.2; frame.BorderSizePixel = 0; frame.Parent = sg
         local label = Instance.new("TextLabel")
-        label.Size = UDim2.new(1, 0, 1, 0)
-        label.BackgroundTransparency = 1
-        label.Text = msg
-        label.TextColor3 = Color3.new(1, 1, 1)
-        label.Font = Enum.Font.Jura
-        label.TextSize = 14
-        label.Parent = frame
+        label.Size = UDim2.new(1, 0, 1, 0); label.BackgroundTransparency = 1; label.Text = msg
+        label.TextColor3 = Color3.new(1, 1, 1); label.Font = Enum.Font.Jura; label.TextSize = 14; label.Parent = frame
         Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
         frame:TweenPosition(UDim2.new(0.5, -125, 0.75, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.3, true)
         task.wait(duration)
         frame:TweenPosition(UDim2.new(0.5, -125, 0.85, 0), Enum.EasingDirection.In, Enum.EasingStyle.Quad, 0.3, true)
-        task.wait(0.3)
-        frame:Destroy()
+        task.wait(0.3); frame:Destroy()
     end)
 end
 
--- ========== ПРЕДИКТ ==========
 local function getPing()
-    local success, ping = pcall(function()
-        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
-    end)
-    return success and (ping / 1000) or 0
+    local ok, ping = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    return (ok and ping and ping > 0) and (ping / 1000) or 0
 end
 
+-- ========== VELOCITY ==========
 local velocityCache = {}
 local function getSmoothedVelocity(part)
     if not Config.VelocitySmooth then return part.AssemblyLinearVelocity end
-    local now = tick()
-    local key = tostring(part)
+    local now = tick(); local key = tostring(part)
     if not velocityCache[key] then velocityCache[key] = {} end
     local cache = velocityCache[key]
     table.insert(cache, {v = part.AssemblyLinearVelocity, t = now})
-    while #cache > 0 and now - cache[1].t > 0.1 do table.remove(cache, 1) end
-    local avg = Vector3.zero
-    for _, entry in ipairs(cache) do avg = avg + entry.v end
-    if #cache > 0 then avg = avg / #cache end
-    return avg
+    while #cache > 0 and now - cache[1].t > 0.06 do table.remove(cache, 1) end
+    if #cache == 0 then return part.AssemblyLinearVelocity end
+    local totalW, acc = 0, Vector3.zero
+    for i, entry in ipairs(cache) do
+        local w = i * i; acc = acc + entry.v * w; totalW = totalW + w
+    end
+    return acc / totalW
 end
 
-local function getPredictedPosition(part)
+local function getIntentVelocity(part)
+    local smoothed = getSmoothedVelocity(part)
+    if smoothed.Magnitude > 5 then return smoothed end
+    local char = part.Parent; local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and hum.MoveDirection.Magnitude > 0 then return hum.MoveDirection * hum.WalkSpeed end
+    return smoothed
+end
+
+-- ========== PREDICT ==========
+local function computeTargetPosition(part)
     if not part then return nil end
-    if not Config.PredictEnabled then return part.Position end
-    
-    local vel = getSmoothedVelocity(part)
+    local vel = getIntentVelocity(part)
     if not vel then return part.Position end
-    
-    local multXZ = Config.PredictXZ
-    local multY = Config.PredictY
-    
-    -- Для HRP отключаем вертикальный предикт, чтобы держать идеальный центр
-    if part.Name == "HumanoidRootPart" then
-        multY = 0
+
+    local serverOffset = Vector3.zero
+    if Config.ServerSidePredict then
+        local ping = getPing(); serverOffset = vel * (ping * 0.5)
+        if part.Name == "HumanoidRootPart" then serverOffset = Vector3.new(serverOffset.X, 0, serverOffset.Z) end
     end
-    
-    if Config.PredictOp == "Divide" then
-        if multXZ > 0 then multXZ = 1 / multXZ else multXZ = 0 end
-        if multY > 0 then multY = 1 / multY else multY = 0 end
-    end
-    
-    local offset = Vector3.new(vel.X * multXZ, vel.Y * multY, vel.Z * multXZ)
-    
-    if Config.PingComp then
-        local ping = getPing()
-        local pingOffset = vel * (ping * 0.5)
-        if part.Name == "HumanoidRootPart" then
-            pingOffset = Vector3.new(pingOffset.X, 0, pingOffset.Z)
+
+    local predictOffset = Vector3.zero
+    if Config.PredictEnabled then
+        local multXZ = Config.PredictXZ; local multY = (part.Name == "HumanoidRootPart") and 0 or Config.PredictY
+        if Config.PredictOp == "Divide" then
+            if multXZ > 0 then multXZ = 1 / multXZ end; if multY > 0 then multY = 1 / multY end
         end
-        offset = offset + pingOffset
+        predictOffset = Vector3.new(vel.X * multXZ, vel.Y * multY, vel.Z * multXZ)
     end
-    
-    return part.Position + offset
+
+    local legacyPing = Vector3.zero
+    if Config.PingComp then
+        local ping = getPing(); legacyPing = vel * (ping * 0.5)
+        if part.Name == "HumanoidRootPart" then legacyPing = Vector3.new(legacyPing.X, 0, legacyPing.Z) end
+    end
+    return part.Position + serverOffset + predictOffset + legacyPing
 end
 
--- ========== ВИЗУАЛ ПРЕДИКТА ==========
-local visualPart = nil
-local visualBeam = nil
-local visualAttach0 = nil
-local visualAttach1 = nil
-
+-- ========== VISUALIZER ==========
+local visualPart, visualBeam, visualAttach0, visualAttach1 = nil, nil, nil, nil
 local function createVisualizer()
     if visualPart and visualPart.Parent then return end
-    visualPart = Instance.new("Part")
-    visualPart.Name = "FlickPredictVisual"
-    visualPart.Size = Vector3.new(0.6, 0.6, 0.6)
-    visualPart.Shape = Enum.PartType.Ball
-    visualPart.Material = Enum.Material.Neon
-    visualPart.Color = Color3.fromRGB(255, 50, 50)
-    visualPart.Anchored = true
-    visualPart.CanCollide = false
-    visualPart.CanQuery = false
-    visualPart.CanTouch = false
-    visualPart.Transparency = 0.3
-    visualPart.Parent = Workspace
-    
-    visualAttach0 = Instance.new("Attachment")
-    visualAttach0.Name = "FlickVisualAttach0"
-    visualAttach1 = Instance.new("Attachment")
-    visualAttach1.Name = "FlickVisualAttach1"
-    visualAttach1.Parent = visualPart
-    
-    visualBeam = Instance.new("Beam")
-    visualBeam.Name = "FlickPredictBeam"
-    visualBeam.Attachment0 = visualAttach0
-    visualBeam.Attachment1 = visualAttach1
-    visualBeam.Width0 = 0.15
-    visualBeam.Width1 = 0.15
-    visualBeam.FaceCamera = true
-    visualBeam.Color = ColorSequence.new(Color3.fromRGB(255, 50, 50))
-    visualBeam.Transparency = NumberSequence.new(0.5)
-    visualBeam.Parent = visualPart
+    visualPart = Instance.new("Part"); visualPart.Name = "FlickPredictVisual"; visualPart.Size = Vector3.new(0.6, 0.6, 0.6)
+    visualPart.Shape = Enum.PartType.Ball; visualPart.Material = Enum.Material.Neon; visualPart.Color = Color3.fromRGB(255, 50, 50)
+    visualPart.Anchored = true; visualPart.CanCollide = false; visualPart.CanQuery = false; visualPart.CanTouch = false; visualPart.Transparency = 0.3; visualPart.Parent = Workspace
+    visualAttach0 = Instance.new("Attachment"); visualAttach1 = Instance.new("Attachment"); visualAttach1.Parent = visualPart
+    visualBeam = Instance.new("Beam"); visualBeam.Attachment0 = visualAttach0; visualBeam.Attachment1 = visualAttach1
+    visualBeam.Width0 = 0.15; visualBeam.Width1 = 0.15; visualBeam.FaceCamera = true
+    visualBeam.Color = ColorSequence.new(Color3.fromRGB(255, 50, 50)); visualBeam.Transparency = NumberSequence.new(0.5); visualBeam.Parent = visualPart
 end
 
 local function updateVisualizer()
     if not Config.ShowPredictVisual then
-        if visualPart then visualPart.Transparency = 1 end
-        if visualBeam then visualBeam.Enabled = false end
-        return
+        if visualPart then visualPart.Transparency = 1 end; if visualBeam then visualBeam.Enabled = false end; return
     end
-    
     local murderer = findMurderer()
     if not murderer or not murderer.Character then
-        if visualPart then visualPart.Transparency = 1 end
-        if visualBeam then visualBeam.Enabled = false end
-        return
+        if visualPart then visualPart.Transparency = 1 end; if visualBeam then visualBeam.Enabled = false end; return
     end
-    
-    local targetPart = murderer.Character:FindFirstChild(Config.TargetPart)
+    local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then
-        targetPart = murderer.Character:FindFirstChild("HumanoidRootPart")
+        if visualPart then visualPart.Transparency = 1 end; if visualBeam then visualBeam.Enabled = false end; return
     end
-    if not targetPart then
-        if visualPart then visualPart.Transparency = 1 end
-        if visualBeam then visualBeam.Enabled = false end
-        return
-    end
-    
     createVisualizer()
-    
-    local predPos = getPredictedPosition(targetPart)
-    visualPart.Position = predPos
-    visualPart.Transparency = 0.3
-    visualBeam.Enabled = true
-    
-    local char = LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if hrp then
-        visualAttach0.Parent = hrp
-        visualAttach0.Position = Vector3.new(0, 1, 0)
-    else
-        visualAttach0.Parent = visualPart
-        visualAttach0.Position = Vector3.zero
-    end
+    local predPos = computeTargetPosition(targetPart)
+    visualPart.Position = predPos; visualPart.Transparency = 0.3; visualBeam.Enabled = true
+    local char = LocalPlayer.Character; local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then visualAttach0.Parent = hrp; visualAttach0.Position = Vector3.new(0, 1, 0) else visualAttach0.Parent = visualPart; visualAttach0.Position = Vector3.zero end
 end
 
--- ========== GUI ДРЭГ ==========
+-- ========== DRAG ==========
 local DragSystem = {}
 function DragSystem.MakeDraggable(gui, dragArea, onPositionChanged)
     local dragging, dragStart, startPos = false, nil, nil
-    dragArea.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true; dragStart = input.Position; startPos = gui.Position
-        end
-    end)
-    dragArea.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
-            dragging = false
-            if onPositionChanged then onPositionChanged({xs = gui.Position.X.Scale, xo = gui.Position.X.Offset, ys = gui.Position.Y.Scale, yo = gui.Position.Y.Offset}) end
-        end
-    end)
+    dragArea.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; dragStart = input.Position; startPos = gui.Position end end)
+    dragArea.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then dragging = false; if onPositionChanged then onPositionChanged() end end end)
     UserInputService.InputChanged:Connect(function(input)
         if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-            local delta = input.Position - dragStart
-            gui.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            local delta = input.Position - dragStart; gui.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end)
 end
 
--- ========== ЛОГИКА FLICK ==========
-local lastCameraCFrame = nil
-local returnToken = 0
+-- ========== CORE ==========
+local lastCameraCFrame = nil; local returnToken = 0
 
 function findMurderer()
     if game.PlaceId == 142823291 then
-        local success, roleData = pcall(function()
-            local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
-            if remote and remote:IsA("RemoteFunction") then return remote:InvokeServer() end
-        end)
+        local success, roleData = pcall(function() local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true); if remote and remote:IsA("RemoteFunction") then return remote:InvokeServer() end end)
         if success and roleData then
             for playerName, data in pairs(roleData) do
-                if data.Role == "Murderer" and not data.Killed and not data.Dead then
-                    local p = Players:FindFirstChild(playerName)
-                    if p then return p end
-                end
-            end
-        end
-        return nil
-    else
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer and player.Character then
-                local char = player.Character
-                local root = char:FindFirstChild("HumanoidRootPart")
-                local hum = char:FindFirstChild("Humanoid")
-                if root and hum and hum.Health > 0 then
-                    if player:FindFirstChild("Backpack") and player.Backpack:FindFirstChild("Knife") then return player end
-                    for _, tool in ipairs(char:GetChildren()) do
-                        if tool:IsA("Tool") and tool.Name == "Knife" then return player end
-                    end
-                end
+                if data.Role == "Murderer" and not data.Killed and not data.Dead then local p = Players:FindFirstChild(playerName); if p then return p end end
             end
         end
         return nil
     end
-end
-
-local function findShootRemote()
-    local ns = ReplicatedStorage:FindFirstChild("Axioria Solver was here.")
-    if not ns then return nil end
-    for _, v in ipairs(ns:GetChildren()) do
-        if v:IsA("RemoteEvent") then return v end
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local char = player.Character; local root = char:FindFirstChild("HumanoidRootPart"); local hum = char:FindFirstChild("Humanoid")
+            if root and hum and hum.Health > 0 then
+                if player:FindFirstChild("Backpack") and player.Backpack:FindFirstChild("Knife") then return player end
+                for _, tool in ipairs(char:GetChildren()) do if tool:IsA("Tool") and tool.Name == "Knife" then return player end end
+            end
+        end
     end
     return nil
 end
 
-local function autoShoot(murderer)
-    if not Config.AutoShoot then return end
-    if not murderer or not murderer.Character then return end
-    local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
-    if not targetPart then return end
-    local targetPos = getPredictedPosition(targetPart)
-    if not targetPos then return end
-    
+-- ОБНОВЛЕННЫЙ ПОИСК РЕМОУТА (по твоему скриншоту)
+local function findShootRemote()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if not remotes then return nil end
+    local gunFolder = remotes:FindFirstChild("Gun")
+    if not gunFolder then return nil end
+    return gunFolder:FindFirstChild("Shoot")
+end
+
+-- ОБНОВЛЕННЫЙ ВЫСТРЕЛ (пробуем разные форматы)
+local function fireOnce(targetPos)
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
     local remote = findShootRemote()
     if remote then
-        pcall(function() remote:FireServer({ workspace.CurrentCamera.CFrame, CFrame.new(targetPos) }) end)
+        -- Пробуем формат 1: просто Vector3 позиции цели
+        pcall(function() remote:FireServer(targetPos) end)
+        -- Пробуем формат 2: CFrame позиции цели
+        pcall(function() remote:FireServer(CFrame.new(targetPos)) end)
+        -- Пробуем формат 3: массив из камеры и цели (как было в старом скрипте)
+        pcall(function() remote:FireServer({ cam.CFrame, CFrame.new(targetPos) }) end)
     end
-    
+
+    -- Дублируем выстрел через физическую пушку (она сама ударит в камеру)
     local char = LocalPlayer.Character
-    if char then
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        local backpack = LocalPlayer:FindFirstChild("Backpack")
-        local gun = char:FindFirstChild("Gun") or (backpack and backpack:FindFirstChild("Gun"))
-        if gun and gun:IsA("Tool") and hum then
-            if gun.Parent ~= char then
-                pcall(function() hum:EquipTool(gun) end)
-                task.wait(0.1)
-            end
-            pcall(function() gun:Activate() end)
-            pcall(function()
-                local vu = game:GetService("VirtualUser")
-                vu:Button1Down(Vector2.zero)
-                vu:Button1Up(Vector2.zero)
-            end)
-        end
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local gun = char:FindFirstChild("Gun") or (backpack and backpack:FindFirstChild("Gun"))
+    if gun and gun:IsA("Tool") and hum then
+        if gun.Parent ~= char then pcall(function() hum:EquipTool(gun) end); task.wait(0.05) end
+        pcall(function() gun:Activate() end)
+        pcall(function() local vu = game:GetService("VirtualUser"); vu:Button1Down(Vector2.zero); vu:Button1Up(Vector2.zero) end)
     end
 end
 
-local function returnCameraWithRandomness(token)
-    if token and token ~= returnToken then return end
-    if not Config.ReturnCamera or not lastCameraCFrame then return end
+local function returnCameraWithRandomness(token, onDone)
+    local function done() if onDone then onDone() end end
+    if token and token ~= returnToken then return done() end
+    if not Config.ReturnCamera or not lastCameraCFrame then return done() end
     local cam = workspace.CurrentCamera
-    local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100)
-    local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
+    local randomX = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessX / 100); local randomY = (math.random() - 0.5) * 2 * (Config.ReturnRandomnessY / 100)
     local newLook = (lastCameraCFrame.LookVector + lastCameraCFrame.RightVector * randomX + lastCameraCFrame.UpVector * randomY).Unit
     local targetCFrame = CFrame.lookAt(lastCameraCFrame.Position, lastCameraCFrame.Position + newLook)
     local oldCFrame = cam.CFrame
@@ -362,39 +271,49 @@ local function returnCameraWithRandomness(token)
     local totalTime = math.clamp(angleDist / (Config.ReturnSpeed * 2), 0.01, 0.35)
     local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
     for i = 1, steps do
-        if token and token ~= returnToken then return end
-        cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps)
-        task.wait(totalTime / steps)
+        if token and token ~= returnToken then return done() end
+        cam.CFrame = oldCFrame:Lerp(targetCFrame, i / steps); task.wait(totalTime / steps)
     end
-    lastCameraCFrame = nil
+    lastCameraCFrame = nil; done()
 end
 
 function flickToMurderer()
     if not Config.Enabled then notify("Flick is disabled!", 1) return end
     local murderer = findMurderer()
-    if not murderer then notify("Murderer not found!", 1) return end
-    
-    local cam, char = workspace.CurrentCamera, LocalPlayer.Character
+    if not murderer or not murderer.Character then notify("Murderer not found!", 1) return end
+
+    local cam = workspace.CurrentCamera; local char = LocalPlayer.Character
     if not char then return end
-    local rootPart = char:FindFirstChild("HumanoidRootPart")
-    if not rootPart then return end
-    
-    if Config.ReturnCamera then lastCameraCFrame = cam.CFrame end
-    
+    local rootPart = char:FindFirstChild("HumanoidRootPart"); local hum = char:FindFirstChildOfClass("Humanoid")
+    if not rootPart or not hum then return end
+
     local targetPart = murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart")
     if not targetPart then notify("Target part not found!", 1) return end
-    local targetPos = getPredictedPosition(targetPart)
-    if not targetPos then notify("Cannot get target position!", 1) return end
-    
-    -- Поворачиваем тело в сторону цели (идеальный центр)
+
+    if Config.ReturnCamera then lastCameraCFrame = cam.CFrame end
+    local prevAutoRotate = hum.AutoRotate; local prevCamType = cam.CameraType; local prevCamSubject = cam.CameraSubject
+    local camLocked = false
+
+    if Config.CameraLock then cam.CameraType = Enum.CameraType.Scriptable; camLocked = true end
+    if Config.AutoRotateLock then hum.AutoRotate = false end
+
+    local function restoreCam()
+        if camLocked and cam and cam.Parent then cam.CameraType = prevCamType; if prevCamSubject then cam.CameraSubject = prevCamSubject end end
+    end
+    local function restoreAutoRotate()
+        if hum and hum.Parent then hum.AutoRotate = prevAutoRotate end
+    end
+
+    local targetPos = computeTargetPosition(targetPart)
+    if not targetPos then notify("Cannot get target position!", 1); restoreCam(); restoreAutoRotate(); return end
+
     local flatTarget = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
-    local dir = (flatTarget - rootPart.Position)
-    if dir.Magnitude < 0.01 then return end
+    local dir = flatTarget - rootPart.Position
+    if dir.Magnitude < 0.01 then restoreCam(); restoreAutoRotate(); return end
     local newHRPCFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + dir.Unit)
-    
+
     local headPos = char:FindFirstChild("Head") and char.Head.Position or rootPart.Position
     local isFirstPerson = (cam.CFrame.Position - headPos).Magnitude < 5
-    
     local newCamCFrame
     if isFirstPerson then
         newCamCFrame = CFrame.lookAt(cam.CFrame.Position, targetPos)
@@ -402,38 +321,61 @@ function flickToMurderer()
         local distance = (cam.CFrame.Position - rootPart.Position).Magnitude
         newCamCFrame = CFrame.lookAt(rootPart.Position + (targetPos - rootPart.Position).Unit * distance, targetPos)
     end
-    
+
     if Config.InstantFlick then
-        rootPart.CFrame = newHRPCFrame
-        cam.CFrame = newCamCFrame
+        rootPart.CFrame = newHRPCFrame; cam.CFrame = newCamCFrame
     else
-        local oldCFrame = cam.CFrame
-        local oldHRP = rootPart.CFrame
+        local oldCFrame = cam.CFrame; local oldHRP = rootPart.CFrame
         local angleDist = math.acos(math.clamp(oldCFrame.LookVector:Dot((targetPos - oldCFrame.Position).Unit), -1, 1))
         local totalTime = math.clamp(angleDist / (Config.FlickSpeed * 2), 0.01, 0.35)
         local steps = math.clamp(math.floor(60 * totalTime), 8, 40)
         for i = 1, steps do
             if not rootPart.Parent then break end
-            local alpha = i / steps
-            rootPart.CFrame = oldHRP:Lerp(newHRPCFrame, alpha)
-            cam.CFrame = oldCFrame:Lerp(newCamCFrame, alpha)
-            task.wait(totalTime / steps)
+            local a = i / steps; rootPart.CFrame = oldHRP:Lerp(newHRPCFrame, a); cam.CFrame = oldCFrame:Lerp(newCamCFrame, a); task.wait(totalTime / steps)
         end
     end
-    
-    autoShoot(murderer)
-    
+
+    if Config.ReplicationSync then RunService.Heartbeat:Wait(); RunService.Heartbeat:Wait() end
+
+    if Config.AutoShoot then
+        if Config.BurstFire then
+            local count = math.max(1, math.floor(Config.BurstCount)); local delay = math.max(0, Config.BurstDelay / 1000)
+            for i = 1, count do
+                local tp = murderer.Character and (murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart"))
+                if not tp or not tp.Parent then break end
+                local p = computeTargetPosition(tp)
+                if p then
+                    local fT = Vector3.new(p.X, rootPart.Position.Y, p.Z); local d = fT - rootPart.Position
+                    if d.Magnitude > 0.01 then rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + d.Unit) end
+                    if cam then cam.CFrame = CFrame.lookAt(cam.CFrame.Position, p) end
+                    if Config.ReplicationSync then RunService.Heartbeat:Wait() end
+                    fireOnce(p)
+                end
+                if i < count and delay > 0 then task.wait(delay) end
+            end
+        else
+            local tp = murderer.Character and (murderer.Character:FindFirstChild(Config.TargetPart) or murderer.Character:FindFirstChild("HumanoidRootPart"))
+            local p = tp and computeTargetPosition(tp)
+            if p then
+                local fT = Vector3.new(p.X, rootPart.Position.Y, p.Z); local d = fT - rootPart.Position
+                if d.Magnitude > 0.01 then rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + d.Unit) end
+                if cam then cam.CFrame = CFrame.lookAt(cam.CFrame.Position, p) end
+                fireOnce(p)
+            end
+        end
+    end
+
+    task.delay(0.05, restoreAutoRotate)
+
     if Config.ReturnCamera then
-        returnToken = returnToken + 1
-        local myToken = returnToken
-        task.spawn(function()
-            task.wait(Config.ReturnDelay / 1000)
-            returnCameraWithRandomness(myToken)
-        end)
+        returnToken = returnToken + 1; local myToken = returnToken
+        task.spawn(function() task.wait(Config.ReturnDelay / 1000); returnCameraWithRandomness(myToken, restoreCam) end)
+    else
+        task.delay(0.05, restoreCam)
     end
 end
 
--- ========== KEYBIND ==========
+-- ========== KEYBIND & VISUAL LOOP ==========
 local waitingForBind = false
 local function setupKeybind()
     if getgenv().KeybindConnection then pcall(function() getgenv().KeybindConnection:Disconnect() end) end
@@ -441,255 +383,158 @@ local function setupKeybind()
         if gameProcessed then return end
         if waitingForBind then
             waitingForBind = false
-            if input.KeyCode ~= Enum.KeyCode.Unknown then
-                Config.Keybind = input.KeyCode.Name
-                saveConfig()
-                notify("Keybind set to: " .. Config.Keybind, 1)
-            end
+            if input.KeyCode ~= Enum.KeyCode.Unknown then Config.Keybind = input.KeyCode.Name; saveConfig(); notify("Keybind set to: " .. Config.Keybind, 1) end
             return
         end
         if input.KeyCode == Enum.KeyCode[Config.Keybind] then flickToMurderer() end
     end)
 end
 
--- ========== ВИЗУАЛ ЛУП ==========
-RunService.RenderStepped:Connect(function()
-    pcall(updateVisualizer)
-end)
+RunService.RenderStepped:Connect(function() pcall(updateVisualizer) end)
 
--- ========== ГЛАВНОЕ GUI ==========
+-- ========== GUI ==========
 local MainGui, MainFrame, CircleButton = nil, nil, nil
-
 local function createMainGUI()
     if MainGui then pcall(function() MainGui:Destroy() end) end
-    MainGui = Instance.new("ScreenGui")
-    MainGui.Name = "FlickMainGUI"; MainGui.ResetOnSpawn = false; MainGui.IgnoreGuiInset = true; MainGui.Parent = getSafeParent()
-    
-    CircleButton = Instance.new("TextButton")
-    CircleButton.Size = UDim2.new(0, 50, 0, 50); CircleButton.Position = UDim2.new(0.85, 0, 0.85, 0)
-    CircleButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100); CircleButton.Text = "⚡"
-    CircleButton.TextColor3 = Color3.new(1, 1, 1); CircleButton.Font = Enum.Font.Jura; CircleButton.TextSize = 24; CircleButton.Parent = MainGui
-    Instance.new("UICorner", CircleButton).CornerRadius = UDim.new(1, 0)
-    DragSystem.MakeDraggable(CircleButton, CircleButton, function(pos) end)
-    
-    MainFrame = Instance.new("Frame")
-    MainFrame.Size = UDim2.new(0, 300, 0, 700); MainFrame.Position = UDim2.new(0.5, -150, 0.15, 0)
+    MainGui = Instance.new("ScreenGui"); MainGui.Name = "FlickMainGUI"; MainGui.ResetOnSpawn = false; MainGui.IgnoreGuiInset = true; MainGui.Parent = getSafeParent()
+
+    CircleButton = Instance.new("TextButton"); CircleButton.Size = UDim2.new(0, 50, 0, 50); CircleButton.Position = UDim2.new(0.85, 0, 0.85, 0)
+    CircleButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100); CircleButton.Text = "⚡"; CircleButton.TextColor3 = Color3.new(1, 1, 1); CircleButton.Font = Enum.Font.Jura; CircleButton.TextSize = 24
+    CircleButton.Parent = MainGui; Instance.new("UICorner", CircleButton).CornerRadius = UDim.new(1, 0); DragSystem.MakeDraggable(CircleButton, CircleButton)
+
+    MainFrame = Instance.new("Frame"); MainFrame.Size = UDim2.new(0, 320, 0, 720); MainFrame.Position = UDim2.new(0.5, -160, 0.1, 0)
     MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25); MainFrame.BorderSizePixel = 0; MainFrame.Visible = false; MainFrame.Parent = MainGui
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
-    
-    local Title = Instance.new("TextLabel", MainFrame)
-    Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5); Title.BackgroundTransparency = 1
-    Title.Text = "⚡ FLICK TO MURDERER"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18
-    Title.Active = true
-    DragSystem.MakeDraggable(MainFrame, Title, function(pos) end)
-    
-    local Container = Instance.new("ScrollingFrame", MainFrame)
-    Container.Size = UDim2.new(1, -20, 1, -50); Container.Position = UDim2.new(0, 10, 0, 45)
+
+    local Title = Instance.new("TextLabel", MainFrame); Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5)
+    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK (ACCURACY EDITION)"; Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.Jura; Title.TextSize = 18; Title.Active = true
+    DragSystem.MakeDraggable(MainFrame, Title)
+
+    local Container = Instance.new("ScrollingFrame", MainFrame); Container.Size = UDim2.new(1, -20, 1, -50); Container.Position = UDim2.new(0, 10, 0, 45)
     Container.BackgroundTransparency = 1; Container.CanvasSize = UDim2.new(0, 0, 0, 0); Container.ScrollBarThickness = 4
-    
-    local Layout = Instance.new("UIListLayout", Container)
-    Layout.Padding = UDim.new(0, 8); Layout.SortOrder = Enum.SortOrder.LayoutOrder
-    Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        Container.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y)
-    end)
-    
+
+    local Layout = Instance.new("UIListLayout", Container); Layout.Padding = UDim.new(0, 8); Layout.SortOrder = Enum.SortOrder.LayoutOrder
+    Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function() Container.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y) end)
+
     local function addToggle(text, getValue, setValue)
-        local btn = Instance.new("TextButton", Container)
-        btn.Size = UDim2.new(1, 0, 0, 40); btn.BackgroundColor3 = getValue() and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-        btn.TextColor3 = Color3.new(1, 1, 1); btn.Font = Enum.Font.Jura; btn.TextSize = 14
-        btn.Text = text .. ": " .. (getValue() and "ON" or "OFF")
+        local btn = Instance.new("TextButton", Container); btn.Size = UDim2.new(1, 0, 0, 36)
+        btn.BackgroundColor3 = getValue() and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
+        btn.TextColor3 = Color3.new(1, 1, 1); btn.Font = Enum.Font.Jura; btn.TextSize = 13; btn.Text = text .. ": " .. (getValue() and "ON" or "OFF")
         Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
         btn.MouseButton1Click:Connect(function()
-            local newValue = not getValue()
-            setValue(newValue); btn.Text = text .. ": " .. (newValue and "ON" or "OFF")
-            btn.BackgroundColor3 = newValue and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45)
-            saveConfig(); notify(text .. " " .. (newValue and "ON" or "OFF"), 1)
+            local v = not getValue(); setValue(v); btn.Text = text .. ": " .. (v and "ON" or "OFF")
+            btn.BackgroundColor3 = v and Color3.fromRGB(60, 80, 60) or Color3.fromRGB(40, 40, 45); saveConfig(); notify(text .. " " .. (v and "ON" or "OFF"), 1)
         end)
     end
-    
+
     local function addDropdown(text, options, getValue, setValue)
-        local btn = Instance.new("TextButton", Container)
-        btn.Size = UDim2.new(1, 0, 0, 40); btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
-        btn.TextColor3 = Color3.new(1, 1, 1); btn.Font = Enum.Font.Jura; btn.TextSize = 14
-        btn.Text = text .. ": " .. getValue()
+        local btn = Instance.new("TextButton", Container); btn.Size = UDim2.new(1, 0, 0, 36); btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45); btn.TextColor3 = Color3.new(1, 1, 1); btn.Font = Enum.Font.Jura; btn.TextSize = 13; btn.Text = text .. ": " .. getValue()
         Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-        
-        local frame = Instance.new("Frame", Container)
-        frame.Size = UDim2.new(1, 0, 0, 0); frame.BackgroundTransparency = 1; frame.ClipsDescendants = true
-        local list = Instance.new("UIListLayout", frame)
-        list.Padding = UDim.new(0, 2)
-        
+        local frame = Instance.new("Frame", Container); frame.Size = UDim2.new(1, 0, 0, 0); frame.BackgroundTransparency = 1; frame.ClipsDescendants = true
+        local list = Instance.new("UIListLayout", frame); list.Padding = UDim.new(0, 2)
         local expanded = false
         for _, opt in ipairs(options) do
-            local optBtn = Instance.new("TextButton", frame)
-            optBtn.Size = UDim2.new(1, 0, 0, 30); optBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-            optBtn.TextColor3 = Color3.new(1, 1, 1); optBtn.Font = Enum.Font.Jura; optBtn.TextSize = 12; optBtn.Text = opt
-            Instance.new("UICorner", optBtn).CornerRadius = UDim.new(0, 4)
-            optBtn.MouseButton1Click:Connect(function()
-                setValue(opt)
-                btn.Text = text .. ": " .. opt
-                frame.Size = UDim2.new(1, 0, 0, 0)
-                expanded = false
-                saveConfig()
-            end)
+            local o = Instance.new("TextButton", frame); o.Size = UDim2.new(1, 0, 0, 28); o.BackgroundColor3 = Color3.fromRGB(30, 30, 35); o.TextColor3 = Color3.new(1, 1, 1); o.Font = Enum.Font.Jura; o.TextSize = 12; o.Text = opt
+            Instance.new("UICorner", o).CornerRadius = UDim.new(0, 4)
+            o.MouseButton1Click:Connect(function() setValue(opt); btn.Text = text .. ": " .. opt; frame.Size = UDim2.new(1, 0, 0, 0); expanded = false; saveConfig() end)
         end
-        
-        btn.MouseButton1Click:Connect(function()
-            expanded = not expanded
-            if expanded then
-                frame.Size = UDim2.new(1, 0, 0, #options * 32)
-            else
-                frame.Size = UDim2.new(1, 0, 0, 0)
-            end
-        end)
+        btn.MouseButton1Click:Connect(function() expanded = not expanded; frame.Size = UDim2.new(1, 0, 0, expanded and (#options * 30) or 0) end)
     end
-    
-    local function addSlider(text, minVal, maxVal, getValue, setValue, isFloat)
-        local frame = Instance.new("Frame", Container)
-        frame.Size = UDim2.new(1, 0, 0, 55); frame.BackgroundTransparency = 1
-        local function formatVal(val) return isFloat and (math.floor(val * 1000) / 1000) or math.floor(val) end
-        
-        local label = Instance.new("TextLabel", frame)
-        label.Size = UDim2.new(1, -60, 0, 22); label.BackgroundTransparency = 1
-        label.Text = text; label.TextColor3 = Color3.new(1, 1, 1); label.Font = Enum.Font.Jura; label.TextSize = 12
-        label.TextXAlignment = Enum.TextXAlignment.Left
-        
-        local textBox = Instance.new("TextBox", frame)
-        textBox.Size = UDim2.new(0, 50, 0, 22); textBox.Position = UDim2.new(1, -50, 0, 0)
-        textBox.BackgroundColor3 = Color3.fromRGB(30, 30, 35); textBox.TextColor3 = Color3.new(1, 1, 1)
-        textBox.Font = Enum.Font.Jura; textBox.TextSize = 12; textBox.Text = tostring(formatVal(getValue()))
-        Instance.new("UICorner", textBox).CornerRadius = UDim.new(0, 4)
-        
-        local sliderBg = Instance.new("Frame", frame)
-        sliderBg.Size = UDim2.new(1, 0, 0, 22); sliderBg.Position = UDim2.new(0, 0, 0, 26)
-        sliderBg.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+
+    local function addSlider(text, minV, maxV, getValue, setValue, isFloat)
+        local frame = Instance.new("Frame", Container); frame.Size = UDim2.new(1, 0, 0, 55); frame.BackgroundTransparency = 1
+        local function fmt(v) return isFloat and (math.floor(v * 1000) / 1000) or math.floor(v) end
+        local label = Instance.new("TextLabel", frame); label.Size = UDim2.new(1, -60, 0, 22); label.BackgroundTransparency = 1; label.Text = text; label.TextColor3 = Color3.new(1, 1, 1); label.Font = Enum.Font.Jura; label.TextSize = 12; label.TextXAlignment = Enum.TextXAlignment.Left
+        local tb = Instance.new("TextBox", frame); tb.Size = UDim2.new(0, 50, 0, 22); tb.Position = UDim2.new(1, -50, 0, 0); tb.BackgroundColor3 = Color3.fromRGB(30, 30, 35); tb.TextColor3 = Color3.new(1, 1, 1); tb.Font = Enum.Font.Jura; tb.TextSize = 12; tb.Text = tostring(fmt(getValue()))
+        Instance.new("UICorner", tb).CornerRadius = UDim.new(0, 4)
+        local sliderBg = Instance.new("Frame", frame); sliderBg.Size = UDim2.new(1, 0, 0, 22); sliderBg.Position = UDim2.new(0, 0, 0, 26); sliderBg.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
         Instance.new("UICorner", sliderBg).CornerRadius = UDim.new(0, 10)
-        
-        local fill = Instance.new("Frame", sliderBg)
-        fill.Size = UDim2.new((getValue() - minVal) / (maxVal - minVal), 0, 1, 0)
-        fill.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+        local fill = Instance.new("Frame", sliderBg); fill.Size = UDim2.new((getValue() - minV) / (maxV - minV), 0, 1, 0); fill.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
         Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 10)
-        
         local dragging = false
-        local function updateVisuals(val)
-            fill.Size = UDim2.new((val - minVal) / (maxVal - minVal), 0, 1, 0)
-            label.Text = text .. ": " .. formatVal(val)
-            textBox.Text = tostring(formatVal(val))
-        end
-        
-        local function updateFromInput(input)
-            local pos = math.clamp((input.Position.X - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1)
-            local val = formatVal(minVal + pos * (maxVal - minVal))
-            updateVisuals(val); setValue(val); saveConfig()
-        end
-        
-        sliderBg.InputBegan:Connect(function(input) 
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; updateFromInput(input) end 
-        end)
-        UserInputService.InputChanged:Connect(function(input) 
-            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then updateFromInput(input) end 
-        end)
-        UserInputService.InputEnded:Connect(function(input) 
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end 
-        end)
-        
-        textBox.FocusLost:Connect(function()
-            local num = tonumber(textBox.Text)
-            if num then
-                num = math.clamp(num, minVal, maxVal)
-                updateVisuals(num); setValue(num); saveConfig()
-            else
-                textBox.Text = tostring(formatVal(getValue()))
-            end
-        end)
+        local function upd(v) fill.Size = UDim2.new((v - minV) / (maxV - minV), 0, 1, 0); label.Text = text .. ": " .. fmt(v); tb.Text = tostring(fmt(v)) end
+        local function fromInput(i) local pos = math.clamp((i.Position.X - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1); local v = fmt(minV + pos * (maxV - minV)); upd(v); setValue(v); saveConfig() end
+        sliderBg.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; fromInput(i) end end)
+        UserInputService.InputChanged:Connect(function(i) if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then fromInput(i) end end)
+        UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
+        tb.FocusLost:Connect(function() local n = tonumber(tb.Text); if n then n = math.clamp(n, minV, maxV); upd(n); setValue(n); saveConfig() else tb.Text = tostring(fmt(getValue())) end end)
     end
-    
-    local function addButton(text, callback)
-        local btn = Instance.new("TextButton", Container)
-        btn.Size = UDim2.new(1, 0, 0, 35); btn.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
-        btn.TextColor3 = Color3.new(1, 1, 1); btn.Font = Enum.Font.Jura; btn.TextSize = 14; btn.Text = text
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-        btn.MouseButton1Click:Connect(callback)
-        return btn
+
+    local function addButton(text, cb)
+        local b = Instance.new("TextButton", Container); b.Size = UDim2.new(1, 0, 0, 32); b.BackgroundColor3 = Color3.fromRGB(50, 50, 55); b.TextColor3 = Color3.new(1, 1, 1); b.Font = Enum.Font.Jura; b.TextSize = 13; b.Text = text
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6); b.MouseButton1Click:Connect(cb); return b
     end
-    
-    local function addSection(title)
-        local section = Instance.new("TextLabel", Container)
-        section.Size = UDim2.new(1, 0, 0, 25); section.BackgroundTransparency = 1
-        section.Text = "─── " .. title .. " ───"; section.TextColor3 = Color3.fromRGB(255, 150, 150)
-        section.Font = Enum.Font.Jura; section.TextSize = 12
+
+    local function addSection(t)
+        local s = Instance.new("TextLabel", Container); s.Size = UDim2.new(1, 0, 0, 22); s.BackgroundTransparency = 1; s.Text = "─── " .. t .. " ───"; s.TextColor3 = Color3.fromRGB(255, 150, 150); s.Font = Enum.Font.Jura; s.TextSize = 11
     end
-    
-    local bodyParts = {"HumanoidRootPart", "Head", "UpperTorso", "LowerTorso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"}
-    
-    addSection("ОСНОВНЫЕ")
+
+    local bodyParts = {"HumanoidRootPart","Head","UpperTorso","LowerTorso","LeftArm","RightArm","LeftLeg","RightLeg"}
+
+    addSection("CORE")
     addToggle("🔘 FLICK", function() return Config.Enabled end, function(v) Config.Enabled = v end)
     addToggle("⚡ INSTANT FLICK", function() return Config.InstantFlick end, function(v) Config.InstantFlick = v end)
-    addSlider("🎚️ FLICK SPEED", 1, 200, function() return Config.FlickSpeed end, function(v) Config.FlickSpeed = v end)
-    
-    addSection("ЦЕЛЬ")
+    addSlider("FLICK SPEED", 1, 200, function() return Config.FlickSpeed end, function(v) Config.FlickSpeed = v end)
+
+    addSection("TARGET")
     addDropdown("TARGET PART", bodyParts, function() return Config.TargetPart end, function(v) Config.TargetPart = v end)
     addToggle("🔫 AUTO SHOOT", function() return Config.AutoShoot end, function(v) Config.AutoShoot = v end)
-    addToggle("👁️ SHOW PREDICT VISUAL", function() return Config.ShowPredictVisual end, function(v) Config.ShowPredictVisual = v end)
+    addToggle("👁 SHOW PREDICT VISUAL", function() return Config.ShowPredictVisual end, function(v) Config.ShowPredictVisual = v end)
 
-    addSection("AIM PREDICT")
+    addSection("PREDICT")
     addToggle("🎯 AIM PREDICT", function() return Config.PredictEnabled end, function(v) Config.PredictEnabled = v end)
-    addToggle("📡 PING COMPENSATION", function() return Config.PingComp end, function(v) Config.PingComp = v end)
+    addToggle("📡 SERVER-SIDE PREDICT", function() return Config.ServerSidePredict end, function(v) Config.ServerSidePredict = v end)
     addToggle("🌊 VELOCITY SMOOTHING", function() return Config.VelocitySmooth end, function(v) Config.VelocitySmooth = v end)
-    
-    local predictOpBtn = addButton("⚙️ PREDICT OP: " .. Config.PredictOp, function()
-        Config.PredictOp = Config.PredictOp == "Multiply" and "Divide" or "Multiply"
-        predictOpBtn.Text = "⚙️ PREDICT OP: " .. Config.PredictOp
-        saveConfig(); notify("Predict Op: " .. Config.PredictOp, 1)
+    addToggle("📶 PING COMP (LEGACY)", function() return Config.PingComp end, function(v) Config.PingComp = v end)
+    local opBtn = addButton("⚙ PREDICT OP: " .. Config.PredictOp, function()
+        Config.PredictOp = Config.PredictOp == "Multiply" and "Divide" or "Multiply"; opBtn.Text = "⚙ PREDICT OP: " .. Config.PredictOp; saveConfig(); notify("Predict Op: " .. Config.PredictOp, 1)
     end)
-    addSlider("↔️ PREDICT X/Z", 0.001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true)
-    addSlider("↕️ PREDICT Y", 0.001, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
-    
-    addSection("ВОЗВРАТ КАМЕРЫ")
+    addSlider("PREDICT X/Z", 0.001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true)
+    addSlider("PREDICT Y", 0.001, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
+
+    addSection("ACCURACY LAYERS")
+    addToggle("🕒 REPLICATION SYNC", function() return Config.ReplicationSync end, function(v) Config.ReplicationSync = v end)
+    addToggle("🎥 CAMERA LOCK", function() return Config.CameraLock end, function(v) Config.CameraLock = v end)
+    addToggle("🔒 AUTOROTATE LOCK", function() return Config.AutoRotateLock end, function(v) Config.AutoRotateLock = v end)
+    addToggle("💥 BURST FIRE", function() return Config.BurstFire end, function(v) Config.BurstFire = v end)
+    addSlider("BURST COUNT", 1, 5, function() return Config.BurstCount end, function(v) Config.BurstCount = v end)
+    addSlider("BURST DELAY (MS)", 0, 200, function() return Config.BurstDelay end, function(v) Config.BurstDelay = v end)
+
+    addSection("CAMERA RETURN")
     addToggle("🔄 AUTO RETURN CAMERA", function() return Config.ReturnCamera end, function(v) Config.ReturnCamera = v end)
-    addSlider("🎯 RETURN SPEED", 1, 200, function() return Config.ReturnSpeed end, function(v) Config.ReturnSpeed = v end)
-    addSlider("⏱️ RETURN DELAY (MS)", 0, 2000, function() return Config.ReturnDelay end, function(v) Config.ReturnDelay = v end)
-    addSlider("🎲 RANDOM X %", 0, 100, function() return Config.ReturnRandomnessX end, function(v) Config.ReturnRandomnessX = v end)
-    addSlider("🎲 RANDOM Y %", 0, 100, function() return Config.ReturnRandomnessY end, function(v) Config.ReturnRandomnessY = v end)
-    
-    addSection("НАСТРОЙКИ")
-    addToggle("🔔 УВЕДОМЛЕНИЯ", function() return Config.NotificationsEnabled end, function(v) Config.NotificationsEnabled = v end)
-    
-    local bindBtn = Instance.new("TextButton", Container)
-    bindBtn.Size = UDim2.new(1, 0, 0, 35); bindBtn.BackgroundColor3 = Color3.fromRGB(80, 70, 50)
-    bindBtn.TextColor3 = Color3.new(1, 1, 1); bindBtn.Font = Enum.Font.Jura; bindBtn.TextSize = 14
-    bindBtn.Text = "⌨️ SET KEYBIND: " .. Config.Keybind
+    addSlider("RETURN SPEED", 1, 200, function() return Config.ReturnSpeed end, function(v) Config.ReturnSpeed = v end)
+    addSlider("RETURN DELAY (MS)", 0, 2000, function() return Config.ReturnDelay end, function(v) Config.ReturnDelay = v end)
+    addSlider("RANDOM X %", 0, 100, function() return Config.ReturnRandomnessX end, function(v) Config.ReturnRandomnessX = v end)
+    addSlider("RANDOM Y %", 0, 100, function() return Config.ReturnRandomnessY end, function(v) Config.ReturnRandomnessY = v end)
+
+    addSection("SETTINGS")
+    addToggle("🔔 NOTIFICATIONS", function() return Config.NotificationsEnabled end, function(v) Config.NotificationsEnabled = v end)
+
+    local bindBtn = Instance.new("TextButton", Container); bindBtn.Size = UDim2.new(1, 0, 0, 32); bindBtn.BackgroundColor3 = Color3.fromRGB(80, 70, 50); bindBtn.TextColor3 = Color3.new(1, 1, 1); bindBtn.Font = Enum.Font.Jura; bindBtn.TextSize = 13; bindBtn.Text = "⌨ SET KEYBIND: " .. Config.Keybind
     Instance.new("UICorner", bindBtn).CornerRadius = UDim.new(0, 6)
     bindBtn.MouseButton1Click:Connect(function()
-        waitingForBind = true; bindBtn.Text = "⌨️ PRESS ANY KEY..."
-        task.wait(3)
-        if waitingForBind then waitingForBind = false; bindBtn.Text = "⌨️ SET KEYBIND: " .. Config.Keybind end
+        waitingForBind = true; bindBtn.Text = "⌨ PRESS ANY KEY..."; task.wait(3)
+        if waitingForBind then waitingForBind = false; bindBtn.Text = "⌨ SET KEYBIND: " .. Config.Keybind end
     end)
-    
-    addButton("👁️ HIDE GUI", function() MainFrame.Visible = false; notify("GUI hidden", 2) end)
+
+    addButton("👁 HIDE GUI", function() MainFrame.Visible = false; notify("GUI hidden", 2) end)
     addButton("💀 DESTROY ALL", function()
-        pcall(function() MainGui:Destroy() end)
-        pcall(function() if visualPart then visualPart:Destroy() end end)
-        MainGui, MainFrame, CircleButton, visualPart, visualBeam = nil, nil, nil, nil, nil
-        notify("All GUI destroyed", 2)
+        pcall(function() MainGui:Destroy() end); pcall(function() if visualPart then visualPart:Destroy() end end)
+        MainGui, MainFrame, CircleButton, visualPart, visualBeam = nil, nil, nil, nil, nil; notify("All GUI destroyed", 2)
     end)
-    
+
     CircleButton.MouseButton1Click:Connect(function() if MainFrame then MainFrame.Visible = not MainFrame.Visible end end)
 end
 
--- ========== ИНИЦИАЛИЗАЦИЯ ==========
+-- ========== INIT ==========
 if getgenv().FlickLoaded then
-    pcall(function() 
-        if MainGui then MainGui:Destroy() end
-        if visualPart then visualPart:Destroy() end
-    end)
+    pcall(function() if MainGui then MainGui:Destroy() end; if visualPart then visualPart:Destroy() end end)
 end
-
 getgenv().FlickLoaded = true
 getgenv().flickToMurderer = flickToMurderer
 
 setupKeybind()
 createMainGUI()
 
-notify("⚡ FLICK TO MURDERER LOADED ⚡\nAuto-return ready", 3)
-print("Flick To Murderer loaded - Autonomous version with Aim Predict & Auto-return")
+notify("⚡ FLICK (ACCURACY EDITION) LOADED ⚡", 3)
+print("Flick To Murderer loaded - Accuracy Edition")
