@@ -1,9 +1,8 @@
 --[[
-    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 26.0.0 (TRUE LOCK)     ║
+    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 26.1.0 (PRECISE)       ║
     ║  • Непрерывный рескан предикта во время наведения                  ║
-    ║  • Стабильность: N кадров в допуске → верификация → выстрел        ║
-    ║  • Никогда не сдаётся, пока цель жива                              ║
-    ║  • Финальный рескан прямо перед FireServer                         ║
+    ║  • Стреляет только при подтверждённом захвате                      ║
+    ║  • Точность предикта до 0.0001                                     ║
 ]]
 
 local Players = game:GetService("Players")
@@ -48,9 +47,10 @@ local Config = {
 
 local CONFIG_FILE = "flick_mm2_config.json"
 local LEGACY_CONFIGS = {
-    "flick_mm2_v25.json", "flick_mm2_v24.json", "flick_mm2_v23.json",
-    "flick_mm2_v22.json", "flick_mm2_v21.json", "flick_mm2_v20.json",
-    "flick_mm2_v19_full.json", "flick_mm2_v16.json", "flick_config_standalone.json"
+    "flick_mm2_v26.json", "flick_mm2_v25.json", "flick_mm2_v24.json",
+    "flick_mm2_v23.json", "flick_mm2_v22.json", "flick_mm2_v21.json",
+    "flick_mm2_v20.json", "flick_mm2_v19_full.json", "flick_mm2_v16.json",
+    "flick_config_standalone.json"
 }
 
 local function saveConfig()
@@ -72,7 +72,7 @@ local function loadConfig()
                     local ok, d = pcall(function() return HttpService:JSONDecode(readfile(legacy)) end)
                     if ok and type(d) == "table" then
                         data = d
-                        print("[FlickV26] Migrated from: " .. legacy)
+                        print("[FlickV26.1] Migrated from: " .. legacy)
                         break
                     end
                 end
@@ -86,7 +86,6 @@ local function loadConfig()
 end
 loadConfig()
 
--- ========== НЕБЛОКИРУЮЩИЙ NOTIFY ==========
 local function getSafeParent()
     local parent = gethui and gethui()
     if parent and typeof(parent) == "Instance" then return parent end
@@ -123,7 +122,6 @@ local function notify(msg, duration)
     end)
 end
 
--- ========== ЧУВСТВИТЕЛЬНОСТЬ ==========
 local sensitivityPxPerRad = 5000
 local sensitivityMeasured = false
 
@@ -144,12 +142,11 @@ local function measureSensitivity()
         if angle > 0.01 then
             sensitivityPxPerRad = 200 / angle
             sensitivityMeasured = true
-            print(("[FlickV26] Sensitivity: %.0f px/rad"):format(sensitivityPxPerRad))
+            print(("[FlickV26.1] Sensitivity: %.0f px/rad"):format(sensitivityPxPerRad))
         end
     end)
 end
 
--- ========== ПОИСК МЁРДЕРА ==========
 function findMurderer()
     local byRole, byKnife = nil, nil
     if game.PlaceId == 142823291 then
@@ -192,7 +189,6 @@ task.spawn(function()
     end
 end)
 
--- ========== ПРЕДИКТ ==========
 local function getPing()
     local ok, p = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
     return ok and (p / 1000) or 0
@@ -231,7 +227,6 @@ local function getPredictedPosition(part)
     return part.Position + offset
 end
 
--- ========== УГЛОВАЯ ДЕЛЬТА ==========
 local function getAngularDelta(cam, targetPos)
     local camPos = cam.CFrame.Position
     local delta = targetPos - camPos
@@ -242,7 +237,6 @@ local function getAngularDelta(cam, targetPos)
     return yaw, pitch
 end
 
--- ========== РЕМОУТ / ПУШКА ==========
 local function findShootRemote()
     local wsPlayer = workspace:FindFirstChild(LocalPlayer.Name)
     if wsPlayer then
@@ -286,7 +280,6 @@ local function equipGun()
     end
 end
 
--- ========== ПЛАВНЫЙ ВОЗВРАТ ==========
 local function smoothReturn(accumX, accumY)
     if not Config.ReturnCamera then return end
     if accumX == 0 and accumY == 0 then return end
@@ -312,7 +305,6 @@ local function smoothReturn(accumX, accumY)
     end
 end
 
--- ========== AIM LOOP — НЕПРЕРЫВНЫЙ РЕСКАН + СТАБИЛЬНОСТЬ ==========
 local isFlicking = false
 
 local function aimLoop(getTargetPos)
@@ -330,19 +322,16 @@ local function aimLoop(getTargetPos)
     for i = 1, maxIterations do
         if not getgenv().FlickRunning then break end
 
-        -- 1. Каждую итерацию заново сканируем предикт
         local targetPos = getTargetPos()
-        if not targetPos then break end  -- цель умерла/ушла
+        if not targetPos then break end
         lastPos = targetPos
 
         local yaw, pitch = getAngularDelta(cam, targetPos)
         local angle = math.sqrt(yaw * yaw + pitch * pitch)
 
-        -- 2. Если в допуске — считаем стабильные кадры
         if angle < tolerance then
             stableFrames = stableFrames + 1
             if stableFrames >= requiredStable then
-                -- 3. Верификация: свежий скан и повторная проверка угла
                 local verifyPos = getTargetPos()
                 if verifyPos then
                     local vy, vp = getAngularDelta(cam, verifyPos)
@@ -362,7 +351,6 @@ local function aimLoop(getTargetPos)
             stableFrames = 0
         end
 
-        -- 4. Двигаем мышь с адаптивным ускорением
         local boost = 1 + math.floor((i - 1) / boostEvery) * 0.5
         local stepFrac = math.min(baseStep * boost, 1.0)
 
@@ -436,14 +424,12 @@ function flickToMurderer()
     measureSensitivity()
     local accumX, accumY, finalPos, converged = aimLoop(getTargetPos)
 
-    -- Не сдаёмся: если converged=false, значит цель умерла/исчезла. Тихо абортим.
     if not converged then
         smoothReturn(accumX, accumY)
         isFlicking = false
         return
     end
 
-    -- ФИНАЛЬНЫЙ РЕСКАН прямо перед выстрелом — стреляем в самую свежую точку
     local freshPos = getTargetPos()
     if freshPos then finalPos = freshPos end
     if not finalPos then
@@ -452,7 +438,6 @@ function flickToMurderer()
         return
     end
 
-    -- CFrame математически точно на финальную точку предикта
     local shootCFrame
     if Config.BulletFromGun then
         local gunPos = getGunPosition()
@@ -467,7 +452,6 @@ function flickToMurderer()
     isFlicking = false
 end
 
--- ========== KEYBIND ==========
 local waitingForBind = false
 local bindBtnRef
 local function setupKeybind()
@@ -487,7 +471,6 @@ local function setupKeybind()
     end)
 end
 
--- ========== UNLOAD ==========
 local MainGui, MainFrame, CircleButton = nil, nil, nil
 
 local function fullUnload()
@@ -506,10 +489,9 @@ local function fullUnload()
     getgenv().FlickLoaded = nil
     getgenv().flickToMurderer = nil
     getgenv().FlickMainGui = nil
-    print("[FlickV26] Fully unloaded.")
+    print("[FlickV26.1] Fully unloaded.")
 end
 
--- ========== UI ==========
 local DragSystem = {}
 function DragSystem.MakeDraggable(gui, dragArea)
     local dragging, dragStart, startPos = false, nil, nil
@@ -551,7 +533,7 @@ local function createMainGUI()
 
     local Title = Instance.new("TextLabel", MainFrame)
     Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5)
-    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK V26"
+    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK V26.1"
     Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.GothamBold
     Title.TextSize = 16; Title.Active = true
     DragSystem.MakeDraggable(MainFrame, Title)
@@ -608,18 +590,26 @@ local function createMainGUI()
         end)
     end
 
-    local function addSlider(text, minV, maxV, getV, setV, isFloat)
+    local function addSlider(text, minV, maxV, getV, setV, isFloat, decimals)
         local frame = Instance.new("Frame", Container)
         frame.Size = UDim2.new(1, 0, 0, 55); frame.BackgroundTransparency = 1
-        local fmt = function(v) return isFloat and string.format("%.2f", v) or tostring(math.floor(v)) end
+        if isFloat and decimals == nil then decimals = 2 end
+        if not isFloat then decimals = 0 end
+        local fmt
+        if decimals > 0 then
+            fmt = function(v) return string.format("%." .. decimals .. "f", v) end
+        else
+            fmt = function(v) return tostring(math.floor(v)) end
+        end
         local label = Instance.new("TextLabel", frame)
-        label.Size = UDim2.new(1, -60, 0, 22); label.BackgroundTransparency = 1
+        label.Size = UDim2.new(1, -70, 0, 22); label.BackgroundTransparency = 1
         label.Text = text; label.TextColor3 = Color3.new(1,1,1); label.Font = Enum.Font.Gotham
         label.TextSize = 12; label.TextXAlignment = Enum.TextXAlignment.Left
         local tb = Instance.new("TextBox", frame)
-        tb.Size = UDim2.new(0, 50, 0, 22); tb.Position = UDim2.new(1, -50, 0, 0)
+        tb.Size = UDim2.new(0, 60, 0, 22); tb.Position = UDim2.new(1, -60, 0, 0)
         tb.BackgroundColor3 = Color3.fromRGB(30, 30, 35); tb.TextColor3 = Color3.new(1,1,1)
-        tb.Font = Enum.Font.Gotham; tb.TextSize = 12; tb.Text = fmt(getV())
+        tb.Font = Enum.Font.Gotham; tb.TextSize = 11; tb.Text = fmt(getV())
+        tb.ClearTextOnFocus = false
         Instance.new("UICorner", tb).CornerRadius = UDim.new(0, 4)
         local bg = Instance.new("Frame", frame)
         bg.Size = UDim2.new(1, 0, 0, 22); bg.Position = UDim2.new(0, 0, 0, 26)
@@ -634,9 +624,13 @@ local function createMainGUI()
             fill.Size = UDim2.new((v - minV) / (maxV - minV), 0, 1, 0)
             label.Text = text .. ": " .. fmt(v); tb.Text = fmt(v)
         end
+        local function roundVal(v)
+            local mult = 10 ^ decimals
+            return math.floor(v * mult + 0.5) / mult
+        end
         local function fromInput(input)
             local pos = math.clamp((input.Position.X - bg.AbsolutePosition.X) / bg.AbsoluteSize.X, 0, 1)
-            local v = minV + pos * (maxV - minV)
+            local v = roundVal(minV + pos * (maxV - minV))
             upd(v); setV(v); saveConfig()
         end
         bg.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; fromInput(i) end end)
@@ -644,8 +638,13 @@ local function createMainGUI()
         UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
         tb.FocusLost:Connect(function()
             local n = tonumber(tb.Text)
-            if n then n = math.clamp(n, minV, maxV); upd(n); setV(n); saveConfig()
-            else tb.Text = fmt(getV()) end
+            if n then
+                n = math.clamp(n, minV, maxV)
+                n = roundVal(n)
+                upd(n); setV(n); saveConfig()
+            else
+                tb.Text = fmt(getV())
+            end
         end)
     end
 
@@ -672,9 +671,9 @@ local function createMainGUI()
     addToggle("🔫 BULLET FROM GUN", function() return Config.BulletFromGun end, function(v) Config.BulletFromGun = v end)
 
     addSection("НАВЕДЕНИЕ (непрерывный рескан)")
-    addSlider("⚡ AIM SPEED", 0.05, 1.0, function() return Config.AimSpeed end, function(v) Config.AimSpeed = v end, true)
-    addSlider("⏱️ AIM MAX TIME", 2.0, 20.0, function() return Config.AimMaxTime end, function(v) Config.AimMaxTime = v end, true)
-    addSlider("🎯 TOLERANCE (град)", 0.01, 2.0, function() return Config.AimToleranceDeg end, function(v) Config.AimToleranceDeg = v end, true)
+    addSlider("⚡ AIM SPEED", 0.05, 1.0, function() return Config.AimSpeed end, function(v) Config.AimSpeed = v end, true, 2)
+    addSlider("⏱️ AIM MAX TIME", 2.0, 20.0, function() return Config.AimMaxTime end, function(v) Config.AimMaxTime = v end, true, 1)
+    addSlider("🎯 TOLERANCE (град)", 0.01, 2.0, function() return Config.AimToleranceDeg end, function(v) Config.AimToleranceDeg = v end, true, 2)
     addSlider("🔒 STABLE FRAMES", 1, 10, function() return Config.AimStableFrames end, function(v) Config.AimStableFrames = v end)
     addSlider("📏 MAX PIX/FRAME", 100, 1500, function() return Config.AimMaxPixels end, function(v) Config.AimMaxPixels = v end)
 
@@ -690,7 +689,7 @@ local function createMainGUI()
     addToggle("🔫 AUTO SHOOT", function() return Config.AutoShoot end, function(v) Config.AutoShoot = v end)
     addToggle("🧱 WALL CHECK", function() return Config.WallCheck end, function(v) Config.WallCheck = v end)
 
-    addSection("AIM PREDICT")
+    addSection("AIM PREDICT (точность 0.0001)")
     addToggle("🎯 AIM PREDICT", function() return Config.PredictEnabled end, function(v) Config.PredictEnabled = v end)
     addToggle("📡 PING COMPENSATION", function() return Config.PingComp end, function(v) Config.PingComp = v end)
     addToggle("🌊 VELOCITY SMOOTHING", function() return Config.VelocitySmooth end, function(v) Config.VelocitySmooth = v end)
@@ -700,13 +699,13 @@ local function createMainGUI()
         predictOpBtn.Text = "⚙️ PREDICT OP: " .. Config.PredictOp
         saveConfig(); notify("Predict Op: " .. Config.PredictOp, 1)
     end)
-    addSlider("↔️ PREDICT X/Z", 0.001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true)
-    addSlider("↕️ PREDICT Y", 0.001, 1.0, function() return Config.PredictY end, function(v) Config.PredictY = v end, true)
+    addSlider("↔️ PREDICT X/Z", 0.0001, 1.0, function() return Config.PredictXZ end, function(v) Config.PredictXZ = v end, true, 4)
+    addSlider("↕️ PREDICT Y", 0.0001, 0.5, function() return Config.PredictY end, function(v) Config.PredictY = v end, true, 4)
 
     addSection("НАСТРОЙКИ")
     addToggle("🔔 УВЕДОМЛЕНИЯ", function() return Config.NotificationsEnabled end, function(v) Config.NotificationsEnabled = v end)
-    addSlider("⏳ CACHE INTERVAL", 0.25, 5.0, function() return Config.CacheInterval end, function(v) Config.CacheInterval = v end, true)
-    addSlider("⏱️ EQUIP TIMEOUT", 0.3, 3.0, function() return Config.EquipTimeout end, function(v) Config.EquipTimeout = v end, true)
+    addSlider("⏳ CACHE INTERVAL", 0.25, 5.0, function() return Config.CacheInterval end, function(v) Config.CacheInterval = v end, true, 2)
+    addSlider("⏱️ EQUIP TIMEOUT", 0.3, 3.0, function() return Config.EquipTimeout end, function(v) Config.EquipTimeout = v end, true, 2)
 
     bindBtnRef = Instance.new("TextButton", Container)
     bindBtnRef.Size = UDim2.new(1, 0, 0, 35); bindBtnRef.BackgroundColor3 = Color3.fromRGB(80, 70, 50)
@@ -730,7 +729,6 @@ local function createMainGUI()
     CircleButton.MouseButton1Click:Connect(function() if MainFrame then MainFrame.Visible = not MainFrame.Visible end end)
 end
 
--- ========== ИНИЦИАЛИЗАЦИЯ ==========
 if getgenv().FlickCleanup then
     pcall(getgenv().FlickCleanup)
 end
@@ -743,5 +741,5 @@ setupKeybind()
 createMainGUI()
 getgenv().FlickMainGui = MainGui
 
-notify("⚡ FLICK V26 LOADED ⚡", 2)
-print("[FlickV26] Continuous rescan + stability + fresh fire pos.")
+notify("⚡ FLICK V26.1 LOADED ⚡", 2)
+print("[FlickV26.1] Precise predict + continuous rescan + fresh fire pos.")
