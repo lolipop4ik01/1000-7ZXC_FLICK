@@ -1,8 +1,8 @@
 --[[
-    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 26.1.0 (PRECISE)       ║
-    ║  • Непрерывный рескан предикта во время наведения                  ║
-    ║  • Стреляет только при подтверждённом захвате                      ║
-    ║  • Точность предикта до 0.0001                                     ║
+    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 28.0.0 (SELF-COMP)     ║
+    ║  • Env-check: стена впереди / пол под мёрдером                    ║
+    ║  • Пересчёт shootOrigin перед выстрелом (бег не ломает аим)        ║
+    ║  • Опциональная компенсация собственной скорости                   ║
 ]]
 
 local Players = game:GetService("Players")
@@ -28,6 +28,7 @@ local Config = {
     NotificationsEnabled = true,
     SilentAim = false,
     BulletFromGun = true,
+    SelfVelocityComp = false,
     AimSpeed = 0.35,
     AimMaxTime = 10.0,
     AimToleranceDeg = 0.1,
@@ -42,15 +43,21 @@ local Config = {
     VelocitySmooth = true,
     WallCheck = true,
     CacheInterval = 1.0,
-    EquipTimeout = 1.5
+    EquipTimeout = 1.5,
+    EnvCheck = true,
+    RaiseOnFall = true,
+    LastVisible = true,
+    WallOffset = 0.4,
+    FallRaise = 2.5,
+    RayCheckRange = 6.0
 }
 
 local CONFIG_FILE = "flick_mm2_config.json"
 local LEGACY_CONFIGS = {
-    "flick_mm2_v26.json", "flick_mm2_v25.json", "flick_mm2_v24.json",
-    "flick_mm2_v23.json", "flick_mm2_v22.json", "flick_mm2_v21.json",
-    "flick_mm2_v20.json", "flick_mm2_v19_full.json", "flick_mm2_v16.json",
-    "flick_config_standalone.json"
+    "flick_mm2_v28.json", "flick_mm2_v27.json", "flick_mm2_v26.json",
+    "flick_mm2_v25.json", "flick_mm2_v24.json", "flick_mm2_v23.json",
+    "flick_mm2_v22.json", "flick_mm2_v21.json", "flick_mm2_v20.json",
+    "flick_mm2_v19_full.json", "flick_mm2_v16.json", "flick_config_standalone.json"
 }
 
 local function saveConfig()
@@ -72,7 +79,7 @@ local function loadConfig()
                     local ok, d = pcall(function() return HttpService:JSONDecode(readfile(legacy)) end)
                     if ok and type(d) == "table" then
                         data = d
-                        print("[FlickV26.1] Migrated from: " .. legacy)
+                        print("[FlickV28] Migrated from: " .. legacy)
                         break
                     end
                 end
@@ -142,7 +149,7 @@ local function measureSensitivity()
         if angle > 0.01 then
             sensitivityPxPerRad = 200 / angle
             sensitivityMeasured = true
-            print(("[FlickV26.1] Sensitivity: %.0f px/rad"):format(sensitivityPxPerRad))
+            print(("[FlickV28] Sensitivity: %.0f px/rad"):format(sensitivityPxPerRad))
         end
     end)
 end
@@ -280,6 +287,62 @@ local function equipGun()
     end
 end
 
+local function getFreshShootOrigin(cam)
+    if Config.BulletFromGun then
+        local gp = getGunPosition()
+        if gp then return gp end
+    end
+    return cam.CFrame.Position
+end
+
+local function adjustTargetForEnvironment(shootOrigin, targetPos, murdererChar)
+    if not Config.EnvCheck then return targetPos, false end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local filter = {}
+    if LocalPlayer.Character then table.insert(filter, LocalPlayer.Character) end
+    if murdererChar then table.insert(filter, murdererChar) end
+    params.FilterDescendantsInstances = filter
+
+    local result = targetPos
+    local adjusted = false
+
+    if Config.LastVisible then
+        local dir = targetPos - shootOrigin
+        if dir.Magnitude > 0.5 then
+            local ray = workspace:Raycast(shootOrigin, dir, params)
+            if ray then
+                local unitDir = dir.Unit
+                local safeDist = math.max(0.5, ray.Distance - Config.WallOffset)
+                result = shootOrigin + unitDir * safeDist
+                adjusted = true
+            end
+        end
+    end
+
+    if Config.RaiseOnFall then
+        local downRay = workspace:Raycast(result, Vector3.new(0, -Config.RayCheckRange, 0), params)
+        if downRay and downRay.Distance < 2.5 then
+            local raise = math.max(Config.FallRaise, 2.5 - downRay.Distance)
+            result = result + Vector3.new(0, raise, 0)
+            adjusted = true
+        end
+    end
+
+    return result, adjusted
+end
+
+local function applySelfVelocityComp(pos)
+    if not Config.SelfVelocityComp then return pos end
+    local myChar = LocalPlayer.Character
+    local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHrp then return pos end
+    local myVel = myHrp.AssemblyLinearVelocity
+    if myVel.Magnitude < 0.1 then return pos end
+    return pos + myVel * (getPing() * 0.5)
+end
+
 local function smoothReturn(accumX, accumY)
     if not Config.ReturnCamera then return end
     if accumX == 0 and accumY == 0 then return end
@@ -408,14 +471,12 @@ function flickToMurderer()
     if not remote then notify("No remote") isFlicking = false return end
 
     if Config.SilentAim then
-        local aimCFrame
-        if Config.BulletFromGun then
-            local gunPos = getGunPosition()
-            aimCFrame = gunPos and CFrame.lookAt(gunPos, initialPos) or CFrame.lookAt(cam.CFrame.Position, initialPos)
-        else
-            aimCFrame = CFrame.lookAt(cam.CFrame.Position, initialPos)
-        end
-        pcall(function() remote:FireServer(aimCFrame, CFrame.new(initialPos)) end)
+        -- ПЕРЕСЧЁТ shootOrigin прямо перед выстрелом (бег не ломает аим)
+        local freshOrigin = getFreshShootOrigin(cam)
+        local adjustedPos = adjustTargetForEnvironment(freshOrigin, initialPos, murderer.Character)
+        adjustedPos = applySelfVelocityComp(adjustedPos)
+        local aimCFrame = CFrame.lookAt(freshOrigin, adjustedPos)
+        pcall(function() remote:FireServer(aimCFrame, CFrame.new(adjustedPos)) end)
         notify("Silent fired")
         isFlicking = false
         return
@@ -438,14 +499,14 @@ function flickToMurderer()
         return
     end
 
-    local shootCFrame
-    if Config.BulletFromGun then
-        local gunPos = getGunPosition()
-        shootCFrame = gunPos and CFrame.lookAt(gunPos, finalPos) or CFrame.lookAt(cam.CFrame.Position, finalPos)
-    else
-        shootCFrame = CFrame.lookAt(cam.CFrame.Position, finalPos)
-    end
-    pcall(function() remote:FireServer(shootCFrame, CFrame.new(finalPos)) end)
+    -- ПЕРЕСЧЁТ shootOrigin прямо перед выстрелом (бег не ломает аим)
+    local freshOrigin = getFreshShootOrigin(cam)
+
+    local adjustedPos = adjustTargetForEnvironment(freshOrigin, finalPos, murderer.Character)
+    adjustedPos = applySelfVelocityComp(adjustedPos)
+
+    local shootCFrame = CFrame.lookAt(freshOrigin, adjustedPos)
+    pcall(function() remote:FireServer(shootCFrame, CFrame.new(adjustedPos)) end)
 
     smoothReturn(accumX, accumY)
     notify("Fired")
@@ -489,7 +550,7 @@ local function fullUnload()
     getgenv().FlickLoaded = nil
     getgenv().flickToMurderer = nil
     getgenv().FlickMainGui = nil
-    print("[FlickV26.1] Fully unloaded.")
+    print("[FlickV28] Fully unloaded.")
 end
 
 local DragSystem = {}
@@ -533,7 +594,7 @@ local function createMainGUI()
 
     local Title = Instance.new("TextLabel", MainFrame)
     Title.Size = UDim2.new(1, 0, 0, 40); Title.Position = UDim2.new(0, 0, 0, 5)
-    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK V26.1"
+    Title.BackgroundTransparency = 1; Title.Text = "⚡ FLICK V28"
     Title.TextColor3 = Color3.fromRGB(255, 100, 100); Title.Font = Enum.Font.GothamBold
     Title.TextSize = 16; Title.Active = true
     DragSystem.MakeDraggable(MainFrame, Title)
@@ -667,19 +728,27 @@ local function createMainGUI()
 
     addSection("ОСНОВНЫЕ")
     addToggle("🔘 FLICK", function() return Config.Enabled end, function(v) Config.Enabled = v end)
-    addToggle("🎯 SILENT AIM (без курсора)", function() return Config.SilentAim end, function(v) Config.SilentAim = v end)
+    addToggle("🎯 SILENT AIM", function() return Config.SilentAim end, function(v) Config.SilentAim = v end)
     addToggle("🔫 BULLET FROM GUN", function() return Config.BulletFromGun end, function(v) Config.BulletFromGun = v end)
 
-    addSection("НАВЕДЕНИЕ (непрерывный рескан)")
+    addSection("НАВЕДЕНИЕ")
     addSlider("⚡ AIM SPEED", 0.05, 1.0, function() return Config.AimSpeed end, function(v) Config.AimSpeed = v end, true, 2)
     addSlider("⏱️ AIM MAX TIME", 2.0, 20.0, function() return Config.AimMaxTime end, function(v) Config.AimMaxTime = v end, true, 1)
     addSlider("🎯 TOLERANCE (град)", 0.01, 2.0, function() return Config.AimToleranceDeg end, function(v) Config.AimToleranceDeg = v end, true, 2)
     addSlider("🔒 STABLE FRAMES", 1, 10, function() return Config.AimStableFrames end, function(v) Config.AimStableFrames = v end)
     addSlider("📏 MAX PIX/FRAME", 100, 1500, function() return Config.AimMaxPixels end, function(v) Config.AimMaxPixels = v end)
 
-    addSection("ВОЗВРАТ (плавный)")
+    addSection("ОКРУЖЕНИЕ (стены / пол)")
+    addToggle("🌍 ENV CHECK", function() return Config.EnvCheck end, function(v) Config.EnvCheck = v end)
+    addToggle("👁️ LAST VISIBLE POINT", function() return Config.LastVisible end, function(v) Config.LastVisible = v end)
+    addToggle("⬆️ RAISE ON FALL", function() return Config.RaiseOnFall end, function(v) Config.RaiseOnFall = v end)
+    addSlider("📏 WALL OFFSET (studs)", 0.1, 3.0, function() return Config.WallOffset end, function(v) Config.WallOffset = v end, true, 2)
+    addSlider("⬆️ FALL RAISE (studs)", 0.5, 6.0, function() return Config.FallRaise end, function(v) Config.FallRaise = v end, true, 2)
+    addSlider("🔍 RAY RANGE (studs)", 2.0, 15.0, function() return Config.RayCheckRange end, function(v) Config.RayCheckRange = v end, true, 1)
+
+    addSection("ВОЗВРАТ")
     addToggle("🔄 AUTO RETURN", function() return Config.ReturnCamera end, function(v) Config.ReturnCamera = v end)
-    addSlider("⚡ RETURN SPEED (шагов)", 3, 60, function() return Config.ReturnSpeed end, function(v) Config.ReturnSpeed = v end)
+    addSlider("⚡ RETURN SPEED", 3, 60, function() return Config.ReturnSpeed end, function(v) Config.ReturnSpeed = v end)
     addSlider("⏱️ BASE DELAY (MS)", 0, 2000, function() return Config.ReturnDelay end, function(v) Config.ReturnDelay = v end)
     addSlider("🎲 RANDOM DELAY (MS)", 0, 500, function() return Config.ReturnRandomDelayMs end, function(v) Config.ReturnRandomDelayMs = v end)
     addSlider("🎯 RANDOM OFFSET (PX)", 0, 50, function() return Config.ReturnRandomPx end, function(v) Config.ReturnRandomPx = v end)
@@ -687,12 +756,13 @@ local function createMainGUI()
     addSection("ЦЕЛЬ")
     addDropdown("TARGET PART", bodyParts, function() return Config.TargetPart end, function(v) Config.TargetPart = v end)
     addToggle("🔫 AUTO SHOOT", function() return Config.AutoShoot end, function(v) Config.AutoShoot = v end)
-    addToggle("🧱 WALL CHECK", function() return Config.WallCheck end, function(v) Config.WallCheck = v end)
+    addToggle("🧱 WALL CHECK (общий)", function() return Config.WallCheck end, function(v) Config.WallCheck = v end)
+    addToggle("🏃 SELF VELOCITY COMP", function() return Config.SelfVelocityComp end, function(v) Config.SelfVelocityComp = v end)
 
-    addSection("AIM PREDICT (точность 0.0001)")
+    addSection("AIM PREDICT (0.0001)")
     addToggle("🎯 AIM PREDICT", function() return Config.PredictEnabled end, function(v) Config.PredictEnabled = v end)
-    addToggle("📡 PING COMPENSATION", function() return Config.PingComp end, function(v) Config.PingComp = v end)
-    addToggle("🌊 VELOCITY SMOOTHING", function() return Config.VelocitySmooth end, function(v) Config.VelocitySmooth = v end)
+    addToggle("📡 PING COMP", function() return Config.PingComp end, function(v) Config.PingComp = v end)
+    addToggle("🌊 VELOCITY SMOOTH", function() return Config.VelocitySmooth end, function(v) Config.VelocitySmooth = v end)
 
     local predictOpBtn = addBtn("⚙️ PREDICT OP: " .. Config.PredictOp, function()
         Config.PredictOp = Config.PredictOp == "Multiply" and "Divide" or "Multiply"
@@ -741,5 +811,5 @@ setupKeybind()
 createMainGUI()
 getgenv().FlickMainGui = MainGui
 
-notify("⚡ FLICK V26.1 LOADED ⚡", 2)
-print("[FlickV26.1] Precise predict + continuous rescan + fresh fire pos.")
+notify("⚡ FLICK V28 LOADED ⚡", 2)
+print("[FlickV28] Fresh shootOrigin + SelfVelComp + env-aware.")
