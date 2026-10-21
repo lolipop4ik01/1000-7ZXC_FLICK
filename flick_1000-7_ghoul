@@ -1,9 +1,8 @@
 --[[
-    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 8.0.0 (FULL)      ║
+    ║  Flick To Murderer — MM2 · SCRIPT VERSION: 8.1.0 (FULL)      ║
+    ║  • Полностью изолированная загрузка (защита от краша)        ║
     ║  • Флик камерой + возврат (игнорирует шифтлок)               ║
-    ║  • Бинд работает корректно                                   ║
-    ║  • Хук логов выключен (ручная стрельба не ломается)          ║
-    ║  • Пошаговая диагностика (F9)                                ║
+    ║  • Хук логов ВЫКЛЮЧЕН (ручная стрельба работает)             ║
 ]]
 
 local Players     = game:GetService("Players")
@@ -16,7 +15,7 @@ local HttpService = game:GetService("HttpService")
 local LP         = Players.LocalPlayer
 local PLAYER_GUI = LP:WaitForChild("PlayerGui")
 
-local SCRIPT_VERSION = "8.0.0"
+local SCRIPT_VERSION = "8.1.0"
 local CONFIG_FILE    = "flick_mm2_config_v8.json"
 
 local Config = {
@@ -37,8 +36,8 @@ local Config = {
     WallCheck      = true,
     EquipTimeout   = 1.5,
     Notifications  = true,
-    DebugHook      = false, -- ВЫКЛ, чтобы не ломать ручную стрельбу
-    DiagnosticMode = true,  -- Выводит шаги в консоль F9
+    DebugHook      = false,
+    DiagnosticMode = true,
 }
 
 local function saveConfig()
@@ -64,7 +63,7 @@ local function Diag(msg)
     end
 end
 
-local INSTANCE_TOKEN = string.format("%d_%d", math.floor(os.clock() * 1e6), math.random(1, 1e9))
+local INSTANCE_TOKEN = tostring(math.random(1, 1e9))
 local activeConnections = {}
 
 local function track(conn) table.insert(activeConnections, conn); return conn end
@@ -77,8 +76,8 @@ local function disconnectAll()
     pcall(function() local sg = PLAYER_GUI:FindFirstChild("FlickNotifyV8"); if sg then sg:Destroy() end end)
 end
 
-if type(getgenv()._flickV8Disconnect) == "function" then pcall(getgenv()._flickV8Disconnect) end
 getgenv()._flickV8Token = INSTANCE_TOKEN
+getgenv()._flickV8Disconnect = disconnectAll
 
 local function notify(text, dur)
     if not Config.Notifications then return end
@@ -149,7 +148,9 @@ local function findMurdererOnce()
         if ok and type(data) == "table" then
             for key, info in pairs(data) do
                 local role = nil
-                if type(info) == "table" then role = info.Role or info.role or info.RoleId elseif type(info) == "string" then role = info end
+                if type(info) == "table" then role = info.Role or info.role or info.RoleId 
+                elseif type(info) == "string" then role = info end
+                
                 local sRole = tostring(role):lower()
                 if sRole == "murderer" or sRole == "1" then
                     local p = nil
@@ -243,43 +244,11 @@ local function resolveShootRemote()
     return nil
 end
 
--- ===================== HOOK (Опционально) =====================
-local function installFireServerHook()
-    if not Config.DebugHook then Diag("Хук отключен (DebugHook = false).") return end
-    local hasGetRawMeta  = (type(getrawmetatable) == "function")
-    local hasSetReadonly = (type(setreadonly)    == "function")
-    local hasGetNamecall = (type(getnamecallmethod) == "function")
-    if not (hasGetRawMeta and hasSetReadonly and hasGetNamecall) then return end
-
-    local mt = getrawmetatable(game)
-    if type(mt) ~= "table" then return end
-    local oldNamecall = mt.__namecall
-    if type(oldNamecall) ~= "function" then return end
-
-    local function wrapper(self, ...)
-        if getnamecallmethod() == "FireServer" and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
-            if not checkcaller() then
-                pcall(function()
-                    print(("[HOOK] FireServer -> %s"):format(self:GetFullName()))
-                    local args = table.pack(...)
-                    for i = 1, args.n do print(("  arg[%d]: %s = %s"):format(i, typeof(args[i]), tostring(args[i]))) end
-                end)
-            end
-        end
-        return oldNamecall(self, ...)
-    end
-
-    setreadonly(mt, false)
-    mt.__namecall = newcclosure and newcclosure(wrapper) or wrapper
-    setreadonly(mt, true)
-    print("[FlickV8-HOOK] Установлен! Ручной выстрел работает.")
-end
-
 local function fireShoot(targetPos, camCF)
     local remote = resolveShootRemote()
     if not remote then return false, "no_remote" end
     local ok = pcall(function() remote:FireServer(camCF, CFrame.new(targetPos)) end)
-    Diag("Выстрел в " .. tostring(targetPos) .. " | Успех: " .. tostring(ok))
+    Diag("Выстрел | Успех: " .. tostring(ok))
     return ok
 end
 
@@ -297,7 +266,6 @@ local function hasLineOfSight(targetPos)
     return workspace:Raycast(root.Position, targetPos - root.Position, params) == nil
 end
 
--- Визуальный поворот камеры и возврат
 local function visualCameraFlick(targetPos, camCF)
     local cam = workspace.CurrentCamera
     if not cam then return end
@@ -374,14 +342,14 @@ local function setupKeybind()
     end))
 end
 
-local function startBind()
+local function startBind(callback)
     notify("Press a key to bind...", 3)
     local conn; local done = false
     conn = UIS.InputBegan:Connect(function(input, processed)
         if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode ~= Enum.KeyCode.Unknown then
             done = true; Config.Keybind = input.KeyCode.Name
             saveConfig(); conn:Disconnect(); notify("Keybind set: " .. Config.Keybind, 1)
-            if getgenv()._flickV8.UpdateBindUI then getgenv()._flickV8.UpdateBindUI(Config.Keybind) end
+            if callback then callback(Config.Keybind) end
         end
     end)
     task.delay(5, function()
@@ -389,149 +357,149 @@ local function startBind()
     end)
 end
 
--- ===================== GUI =====================
-local Theme = {
-    bg = Color3.fromRGB(18, 18, 22), panel = Color3.fromRGB(24, 24, 30),
-    row = Color3.fromRGB(30, 30, 38), rowHover = Color3.fromRGB(38, 38, 46),
-    text = Color3.fromRGB(232, 232, 238), textDim = Color3.fromRGB(150, 150, 160),
-    accent = Color3.fromRGB(255, 100, 100), accentSoft = Color3.fromRGB(255, 150, 150),
-    toggleOn = Color3.fromRGB(90, 170, 115), toggleOff = Color3.fromRGB(50, 50, 60),
-    sliderBg = Color3.fromRGB(50, 50, 60), boxBg = Color3.fromRGB(20, 20, 26),
-    danger = Color3.fromRGB(180, 70, 70),
-}
+-- ===================== GUI BUILDER =====================
+local function createGUI()
+    local Theme = {
+        bg = Color3.fromRGB(18, 18, 22), panel = Color3.fromRGB(24, 24, 30),
+        row = Color3.fromRGB(30, 30, 38), rowHover = Color3.fromRGB(38, 38, 46),
+        text = Color3.fromRGB(232, 232, 238), textDim = Color3.fromRGB(150, 150, 160),
+        accent = Color3.fromRGB(255, 100, 100), accentSoft = Color3.fromRGB(255, 150, 150),
+        toggleOn = Color3.fromRGB(90, 170, 115), toggleOff = Color3.fromRGB(50, 50, 60),
+        sliderBg = Color3.fromRGB(50, 50, 60), boxBg = Color3.fromRGB(20, 20, 26),
+        danger = Color3.fromRGB(180, 70, 70),
+    }
 
-local function makeDraggable(gui, handle)
-    local dragging, dragStart, startPos = false, nil, nil
-    track(handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true; dragStart = input.Position; startPos = gui.Position
-        end
-    end))
-    track(handle.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
-    end))
-    track(UIS.InputChanged:Connect(function(input)
-        if not dragging then return end
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            local delta = input.Position - dragStart
-            gui.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end))
-end
-
-local W = {}
-function W.section(scroll, text)
-    local s = Instance.new("TextLabel")
-    s.Size = UDim2.new(1, 0, 0, 22); s.BackgroundTransparency = 1
-    s.Text = "── " .. text .. " ──"; s.TextColor3 = Theme.accentSoft
-    s.Font = Enum.Font.GothamMedium; s.TextSize = 11; s.TextXAlignment = Enum.TextXAlignment.Left
-    s.Parent = scroll
-end
-
-function W.toggle(scroll, label, key)
-    local row = Instance.new("TextButton")
-    row.Size = UDim2.new(1, 0, 0, 34); row.BackgroundColor3 = Theme.row
-    row.BorderSizePixel = 0; row.AutoButtonColor = false; row.Text = ""; row.Parent = scroll
-    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
-    
-    local name = Instance.new("TextLabel")
-    name.Size = UDim2.new(1, -70, 1, 0); name.Position = UDim2.new(0, 12, 0, 0)
-    name.BackgroundTransparency = 1; name.Text = label; name.TextColor3 = Theme.text
-    name.Font = Enum.Font.Gotham; name.TextSize = 12; name.TextXAlignment = Enum.TextXAlignment.Left; name.Parent = row
-    
-    local pill = Instance.new("Frame")
-    pill.Size = UDim2.new(0, 40, 0, 20); pill.Position = UDim2.new(1, -52, 0.5, -10)
-    pill.BackgroundColor3 = Theme.toggleOff; pill.BorderSizePixel = 0; pill.Parent = row
-    Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
-    
-    local knob = Instance.new("Frame")
-    knob.Size = UDim2.new(0, 16, 0, 16); knob.Position = UDim2.new(0, 2, 0.5, -8)
-    knob.BackgroundColor3 = Color3.fromRGB(180, 180, 190); knob.BorderSizePixel = 0; knob.Parent = pill
-    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
-    
-    local function render()
-        local v = Config[key]
-        pill.BackgroundColor3 = v and Theme.toggleOn or Theme.toggleOff
-        knob.Position = v and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
-        knob.BackgroundColor3 = v and Color3.fromRGB(240, 240, 245) or Color3.fromRGB(150, 150, 160)
-    end
-    render()
-    track(row.MouseEnter:Connect(function() row.BackgroundColor3 = Theme.rowHover end))
-    track(row.MouseLeave:Connect(function() row.BackgroundColor3 = Theme.row end))
-    track(row.MouseButton1Click:Connect(function() Config[key] = not Config[key]; render(); saveConfig() end))
-end
-
-function W.slider(scroll, label, key, minV, maxV, isFloat, step)
-    step = step or (isFloat and 0.001 or 1)
-    local wrap = Instance.new("Frame")
-    wrap.Size = UDim2.new(1, 0, 0, 52); wrap.BackgroundColor3 = Theme.row; wrap.Parent = scroll
-    Instance.new("UICorner", wrap).CornerRadius = UDim.new(0, 7)
-    local name = Instance.new("TextLabel")
-    name.Size = UDim2.new(1, -70, 0, 22); name.Position = UDim2.new(0, 12, 0, 4)
-    name.BackgroundTransparency = 1; name.TextColor3 = Theme.text; name.Font = Enum.Font.Gotham; name.TextSize = 12
-    name.TextXAlignment = Enum.TextXAlignment.Left; name.Parent = wrap
-    local box = Instance.new("TextBox")
-    box.Size = UDim2.new(0, 56, 0, 22); box.Position = UDim2.new(1, -68, 0, 4)
-    box.BackgroundColor3 = Theme.boxBg; box.BorderSizePixel = 0; box.TextColor3 = Theme.text
-    box.Font = Enum.Font.Gotham; box.TextSize = 12; box.ClearTextOnFocus = false; box.Parent = wrap
-    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 5)
-    local bg = Instance.new("Frame")
-    bg.Size = UDim2.new(1, -24, 0, 6); bg.Position = UDim2.new(0, 12, 1, -14)
-    bg.BackgroundColor3 = Theme.sliderBg; bg.Parent = wrap
-    Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
-    local fill = Instance.new("Frame")
-    fill.Size = UDim2.new(0, 0, 1, 0); fill.BackgroundColor3 = Theme.accent; fill.Parent = bg
-    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
-
-    local function fmt(v) return isFloat and (string.format("%.3f", v):gsub("0+$", ""):gsub("%.$", "")) or tostring(math.floor(v)) end
-    local function render()
-        local v = Config[key]; local alpha = math.clamp((v - minV) / (maxV - minV), 0, 1)
-        fill.Size = UDim2.new(alpha, 0, 1, 0); name.Text = label; box.Text = fmt(v)
-    end
-    render()
-
-    local dragging = false
-    local function setFromInput(input)
-        local absX, absW = bg.AbsolutePosition.X, bg.AbsoluteSize.X
-        if absW <= 0 then return end
-        local rel = math.clamp((input.Position.X - absX) / absW, 0, 1)
-        local raw = minV + rel * (maxV - minV)
-        Config[key] = math.clamp(math.floor(raw / step + 0.5) * step, minV, maxV); render()
+    local function makeDraggable(gui, handle)
+        local dragging, dragStart, startPos = false, nil, nil
+        track(handle.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true; dragStart = input.Position; startPos = gui.Position
+            end
+        end))
+        track(handle.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+        end))
+        track(UIS.InputChanged:Connect(function(input)
+            if not dragging then return end
+            if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+                local delta = input.Position - dragStart
+                gui.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end))
     end
 
-    track(bg.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; setFromInput(input) end
-    end))
-    track(UIS.InputChanged:Connect(function(input)
-        if not dragging then return end
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then setFromInput(input) end
-    end))
-    track(UIS.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            if dragging then dragging = false; saveConfig() end
+    local W = {}
+    function W.section(scroll, text)
+        local s = Instance.new("TextLabel")
+        s.Size = UDim2.new(1, 0, 0, 22); s.BackgroundTransparency = 1
+        s.Text = "── " .. text .. " ──"; s.TextColor3 = Theme.accentSoft
+        s.Font = Enum.Font.GothamMedium; s.TextSize = 11; s.TextXAlignment = Enum.TextXAlignment.Left
+        s.Parent = scroll
+    end
+
+    function W.toggle(scroll, label, key)
+        local row = Instance.new("TextButton")
+        row.Size = UDim2.new(1, 0, 0, 34); row.BackgroundColor3 = Theme.row
+        row.BorderSizePixel = 0; row.AutoButtonColor = false; row.Text = ""; row.Parent = scroll
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+        
+        local name = Instance.new("TextLabel")
+        name.Size = UDim2.new(1, -70, 1, 0); name.Position = UDim2.new(0, 12, 0, 0)
+        name.BackgroundTransparency = 1; name.Text = label; name.TextColor3 = Theme.text
+        name.Font = Enum.Font.Gotham; name.TextSize = 12; name.TextXAlignment = Enum.TextXAlignment.Left; name.Parent = row
+        
+        local pill = Instance.new("Frame")
+        pill.Size = UDim2.new(0, 40, 0, 20); pill.Position = UDim2.new(1, -52, 0.5, -10)
+        pill.BackgroundColor3 = Theme.toggleOff; pill.BorderSizePixel = 0; pill.Parent = row
+        Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
+        
+        local knob = Instance.new("Frame")
+        knob.Size = UDim2.new(0, 16, 0, 16); knob.Position = UDim2.new(0, 2, 0.5, -8)
+        knob.BackgroundColor3 = Color3.fromRGB(180, 180, 190); knob.BorderSizePixel = 0; knob.Parent = pill
+        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+        
+        local function render()
+            local v = Config[key]
+            pill.BackgroundColor3 = v and Theme.toggleOn or Theme.toggleOff
+            knob.Position = v and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+            knob.BackgroundColor3 = v and Color3.fromRGB(240, 240, 245) or Color3.fromRGB(150, 150, 160)
         end
-    end))
-    track(box.FocusLost:Connect(function()
-        local n = tonumber(box.Text)
-        if n then Config[key] = math.clamp(math.floor(n / step + 0.5) * step, minV, maxV); saveConfig() end
         render()
-    end))
-end
+        track(row.MouseEnter:Connect(function() row.BackgroundColor3 = Theme.rowHover end))
+        track(row.MouseLeave:Connect(function() row.BackgroundColor3 = Theme.row end))
+        track(row.MouseButton1Click:Connect(function() Config[key] = not Config[key]; render(); saveConfig() end))
+    end
 
-function W.button(scroll, label, onClick, color)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 32); btn.BackgroundColor3 = color or Color3.fromRGB(40, 40, 50)
-    btn.BorderSizePixel = 0; btn.AutoButtonColor = false; btn.Text = label
-    btn.TextColor3 = Theme.text; btn.Font = Enum.Font.GothamMedium; btn.TextSize = 12; btn.Parent = scroll
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
-    local baseColor = color or Color3.fromRGB(40, 40, 50)
-    track(btn.MouseEnter:Connect(function() btn.BackgroundColor3 = baseColor:Lerp(Color3.new(1, 1, 1), 0.06) end))
-    track(btn.MouseLeave:Connect(function() btn.BackgroundColor3 = baseColor end))
-    track(btn.MouseButton1Click:Connect(onClick))
-    return btn
-end
+    function W.slider(scroll, label, key, minV, maxV, isFloat, step)
+        step = step or (isFloat and 0.001 or 1)
+        local wrap = Instance.new("Frame")
+        wrap.Size = UDim2.new(1, 0, 0, 52); wrap.BackgroundColor3 = Theme.row; wrap.Parent = scroll
+        Instance.new("UICorner", wrap).CornerRadius = UDim.new(0, 7)
+        local name = Instance.new("TextLabel")
+        name.Size = UDim2.new(1, -70, 0, 22); name.Position = UDim2.new(0, 12, 0, 4)
+        name.BackgroundTransparency = 1; name.TextColor3 = Theme.text; name.Font = Enum.Font.Gotham; name.TextSize = 12
+        name.TextXAlignment = Enum.TextXAlignment.Left; name.Parent = wrap
+        local box = Instance.new("TextBox")
+        box.Size = UDim2.new(0, 56, 0, 22); box.Position = UDim2.new(1, -68, 0, 4)
+        box.BackgroundColor3 = Theme.boxBg; box.BorderSizePixel = 0; box.TextColor3 = Theme.text
+        box.Font = Enum.Font.Gotham; box.TextSize = 12; box.ClearTextOnFocus = false; box.Parent = wrap
+        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 5)
+        local bg = Instance.new("Frame")
+        bg.Size = UDim2.new(1, -24, 0, 6); bg.Position = UDim2.new(0, 12, 1, -14)
+        bg.BackgroundColor3 = Theme.sliderBg; bg.Parent = wrap
+        Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+        local fill = Instance.new("Frame")
+        fill.Size = UDim2.new(0, 0, 1, 0); fill.BackgroundColor3 = Theme.accent; fill.Parent = bg
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
 
-local function build()
+        local function fmt(v) return isFloat and (string.format("%.3f", v):gsub("0+$", ""):gsub("%.$", "")) or tostring(math.floor(v)) end
+        local function render()
+            local v = Config[key]; local alpha = math.clamp((v - minV) / (maxV - minV), 0, 1)
+            fill.Size = UDim2.new(alpha, 0, 1, 0); name.Text = label; box.Text = fmt(v)
+        end
+        render()
+
+        local dragging = false
+        local function setFromInput(input)
+            local absX, absW = bg.AbsolutePosition.X, bg.AbsoluteSize.X
+            if absW <= 0 then return end
+            local rel = math.clamp((input.Position.X - absX) / absW, 0, 1)
+            local raw = minV + rel * (maxV - minV)
+            Config[key] = math.clamp(math.floor(raw / step + 0.5) * step, minV, maxV); render()
+        end
+
+        track(bg.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; setFromInput(input) end
+        end))
+        track(UIS.InputChanged:Connect(function(input)
+            if not dragging then return end
+            if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then setFromInput(input) end
+        end))
+        track(UIS.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                if dragging then dragging = false; saveConfig() end
+            end
+        end))
+        track(box.FocusLost:Connect(function()
+            local n = tonumber(box.Text)
+            if n then Config[key] = math.clamp(math.floor(n / step + 0.5) * step, minV, maxV); saveConfig() end
+            render()
+        end))
+    end
+
+    function W.button(scroll, label, onClick, color)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 32); btn.BackgroundColor3 = color or Color3.fromRGB(40, 40, 50)
+        btn.BorderSizePixel = 0; btn.AutoButtonColor = false; btn.Text = label
+        btn.TextColor3 = Theme.text; btn.Font = Enum.Font.GothamMedium; btn.TextSize = 12; btn.Parent = scroll
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+        local baseColor = color or Color3.fromRGB(40, 40, 50)
+        track(btn.MouseEnter:Connect(function() btn.BackgroundColor3 = baseColor:Lerp(Color3.new(1, 1, 1), 0.06) end))
+        track(btn.MouseLeave:Connect(function() btn.BackgroundColor3 = baseColor end))
+        track(btn.MouseButton1Click:Connect(onClick))
+        return btn
+    end
+
     local old = PLAYER_GUI:FindFirstChild("FlickMM2V8")
     if old then pcall(function() old:Destroy() end) end
 
@@ -604,8 +572,8 @@ local function build()
     W.slider(scroll, "Predict Y", "PredictY", 0.0, 0.2, true, 0.001)
 
     W.section(scroll, "DIAGNOSTICS")
-    W.toggle(scroll, "Diagnostic Mode (Print to F9)", "DiagnosticMode")
-    W.toggle(scroll, "Debug Hook (Re-enable logs)", "DebugHook")
+    W.toggle(scroll, "Diagnostic Mode (F9)", "DiagnosticMode")
+    W.toggle(scroll, "Debug Hook", "DebugHook")
     W.button(scroll, "🔍 Test Connections (F9)", function() 
         print("=== DIAGNOSTIC ===")
         print("Murderer Cache: " .. tostring(murdererCache and murdererCache.Name))
@@ -619,14 +587,10 @@ local function build()
 
     local bindBtn = W.button(scroll, "⌨️ BIND: " .. Config.Keybind, function()
         bindBtn.Text = "⌨️ PRESS A KEY..."
-        startBind()
-    end, Color3.fromRGB(55, 50, 40))
-
-    getgenv()._flickV8 = {
-        UpdateBindUI = function(newKey)
+        startBind(function(newKey)
             if bindBtn and bindBtn.Parent then bindBtn.Text = "⌨️ BIND: " .. newKey end
-        end
-    }
+        end)
+    end, Color3.fromRGB(55, 50, 40))
 
     local cacheLabel = Instance.new("TextLabel")
     cacheLabel.Size = UDim2.new(1, 0, 0, 22); cacheLabel.BackgroundTransparency = 1
@@ -645,13 +609,21 @@ local function build()
     end, Theme.danger)
 
     track(circle.MouseButton1Click:Connect(function() frame.Visible = not frame.Visible end))
+    
+    return gui
 end
 
 -- ===================== BOOTSTRAP =====================
-installFireServerHook()
-startCacheLoop()
-setupKeybind()
-build()
+local success, err = pcall(function()
+    startCacheLoop()
+    setupKeybind()
+    createGUI()
+end)
 
-notify("Flick MM2 v8 ready.", 2)
-print(("[FlickV8] FULL BUILD loaded · script=%s"):format(SCRIPT_VERSION))
+if success then
+    notify("Flick MM2 v8 ready.", 2)
+    print(("[FlickV8] FULL BUILD loaded · script=%s"):format(SCRIPT_VERSION))
+else
+    warn("[FlickV8] КРИТИЧЕСКАЯ ОШИБКА ЗАГРУЗКИ: " .. tostring(err))
+    notify("Load error: check F9", 5)
+end
